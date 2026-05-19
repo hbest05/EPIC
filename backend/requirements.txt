@@ -14,7 +14,7 @@ passlib[argon2]==1.7.4
 
 # Redis (blockchain write queue)
 redis==5.0.4
-aioredis==2.0.1
+# aioredis==2.0.1
 
 # Validation / serialisation
 pydantic==2.7.1

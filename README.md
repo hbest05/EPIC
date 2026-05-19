@@ -38,8 +38,8 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 
 | Property | Mechanism |
 |---|---|
-| End-to-end encryption | X25519 ECDH + XSalsa20-Poly1305 (libsodium) / AES-GCM (WebCrypto) |
-| Message authenticity | Ed25519 signatures — server cannot forge messages |
+| End-to-end encryption | HPKE Mode_Auth (KEM: X25519, KDF: HKDF-SHA256, AEAD: AES-128-GCM) |
+| Message authenticity | HPKE Mode_Auth — sender private key authenticates encapsulation; server cannot forge messages |
 | Password storage | Argon2id (64 MiB, 3 iterations, parallelism 4) |
 | Session tokens | Short-lived JWTs (HS256, 30 min expiry) |
 | Tamper-evidence | keccak256 hash of each ciphertext anchored to Ethereum |
@@ -240,17 +240,19 @@ Full interactive docs: `http://localhost:8000/docs` (Swagger UI)
 
 ### Message Send Flow
 
+HPKE Mode_Auth binds the sender's static private key into the encapsulation so the recipient can verify the sender without a separate signature step.
+
 ```
 Sender (client)                          Server              Blockchain
     │                                      │                     │
-    ├── Generate ephemeral X25519 keypair  │                     │
-    ├── Fetch recipient's X25519 pubkey ──►│                     │
-    ├── ECDH(eph_sk, recipient_pk) ──► shared_secret             │
-    ├── HKDF(shared_secret) ──► aes_key   │                     │
-    ├── AES-GCM encrypt(plaintext) ──► ciphertext                │
-    ├── Ed25519 sign(ciphertext) ──► signature                   │
+    ├── Fetch recipient's HPKE pubkey ───►│                     │
+    ├── HPKE.SetupAuthS(                  │                     │
+    │     sender_sk, recipient_pk,        │                     │
+    │     info, aad)                      │                     │
+    │   ──► (enc_blob, aead_ctx)          │                     │
+    ├── aead_ctx.Seal(plaintext) ──► ciphertext                  │
     ├── POST /messages/send ────────────►  │                     │
-    │   { ciphertext, eph_pk, signature }  │                     │
+    │   { ciphertext, enc_blob, nonce }    │                     │
     │                               store in DB                  │
     │                               keccak256(ciphertext)        │
     │                               push to Redis queue ────────►│
@@ -266,12 +268,15 @@ Sender (client)                          Server              Blockchain
 Recipient (client)                       Server
     │                                      │
     ├── GET /messages/inbox ─────────────►  │
-    │◄──────────────────────────────────── │ { ciphertext, eph_pk, signature }
-    ├── Ed25519 verify(sig, sender_pk)     │
-    ├── ECDH(my_sk, eph_pk) ──► shared_secret
-    ├── HKDF(shared_secret) ──► aes_key   │
-    └── AES-GCM decrypt(ciphertext) ──► plaintext
+    │◄──────────────────────────────────── │ { ciphertext, enc_blob, nonce, sender_pubkey }
+    ├── HPKE.SetupAuthR(                  │
+    │     enc_blob, recipient_sk,         │
+    │     sender_pk, info, aad)           │
+    │   ──► aead_ctx                      │
+    └── aead_ctx.Open(ciphertext) ──► plaintext
 ```
+
+Associated data (aad) bound into every HPKE seal/open: `sender_id || recipient_id || timestamp || enc_blob`
 
 ---
 

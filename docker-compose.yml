@@ -48,7 +48,7 @@ services:
       POSTGRES_PASSWORD: securemsg
       POSTGRES_DB: securemsg
     ports:
-      - "5432:5432"     # expose for local DB tools (TablePlus, psql)
+      - "5433:5432"    # expose for local DB tools (TablePlus, psql)
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
