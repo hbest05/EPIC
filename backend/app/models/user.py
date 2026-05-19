@@ -8,10 +8,11 @@ can verify message authenticity without trusting the server.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, String, Boolean
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 
 from app.database import Base
 
@@ -26,13 +27,11 @@ class User(Base):
     # Argon2id hash — see services/auth_service.py
     password_hash = Column(String(255), nullable=False)
 
-    # X25519 public key (base64-encoded) for ECDH key exchange
-    # TODO: Populate during registration when client generates key pair
-    x25519_public_key = Column(String(512), nullable=True)
-
-    # Ed25519 public key (base64-encoded) for message signature verification
-    ed25519_public_key = Column(String(512), nullable=True)
-
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     last_seen_at = Column(DateTime, nullable=True)
+
+    key = relationship("UserKey", back_populates="user", uselist=False)
+    sent_messages = relationship("Message", foreign_keys="Message.sender_id", back_populates="sender")
+    received_messages = relationship("Message", foreign_keys="Message.recipient_id", back_populates="recipient")
+    access_records = relationship("MessageAccess", foreign_keys="MessageAccess.user_id", back_populates="user")

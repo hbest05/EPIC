@@ -1,24 +1,23 @@
-"""
-Message ORM model.
-
-The server stores only ciphertext — plaintext is never transmitted unencrypted.
-The keccak256_hash column mirrors what is written to the blockchain so the
-integrity of a message can be independently verified on-chain.
-
-Encryption scheme (to be implemented):
-  - Sender generates an ephemeral X25519 keypair
-  - ECDH with recipient's X25519 public key -> shared secret
-  - XSalsa20-Poly1305 (libsodium box) encrypts the plaintext
-  - Ciphertext + ephemeral public key stored here
-"""
-
 import uuid
-from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, Boolean
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, DateTime, ForeignKey, String
+from sqlalchemy.dialects.postgresql import UUID, BYTEA
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 
 from app.database import Base
+
+
+class UserKey(Base):
+    __tablename__ = "user_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    public_key = Column(BYTEA, nullable=False)
+    key_fingerprint = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="key")
 
 
 class Message(Base):
@@ -27,24 +26,26 @@ class Message(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     recipient_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    ciphertext = Column(BYTEA, nullable=False)
+    nonce = Column(BYTEA, nullable=False)
+    hpke_enc_blob = Column(BYTEA, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    blockchain_tx_hash = Column(String, nullable=True)
 
-    # NaCl box ciphertext (base64-encoded)
-    ciphertext = Column(Text, nullable=False)
+    sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
+    recipient = relationship("User", foreign_keys=[recipient_id], back_populates="received_messages")
+    access_records = relationship("MessageAccess", back_populates="message", cascade="all, delete")
 
-    # Ephemeral X25519 public key used for this message (base64-encoded)
-    ephemeral_public_key = Column(String(512), nullable=False)
 
-    # Ed25519 signature of the ciphertext by sender (base64-encoded)
-    signature = Column(String(512), nullable=True)
+class MessageAccess(Base):
+    __tablename__ = "message_access"
 
-    # keccak256(ciphertext) — anchored to blockchain via MessageDigest contract
-    keccak256_hash = Column(String(66), nullable=True)  # 0x + 64 hex chars
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    message_id = Column(UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    granted_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    granted_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Set to True once the hash has been confirmed on-chain
-    blockchain_confirmed = Column(Boolean, default=False, nullable=False)
-
-    # Ethereum transaction hash of the on-chain submission
-    tx_hash = Column(String(66), nullable=True)
-
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    delivered_at = Column(DateTime, nullable=True)
+    message = relationship("Message", back_populates="access_records")
+    user = relationship("User", foreign_keys=[user_id], back_populates="access_records")
