@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+dist/
+*.egg-info/
+
+# Alembic — don't ignore versions, but ignore compiled cache
+backend/alembic/__pycache__/
+
+# Environment secrets — NEVER commit
+.env
+*.env.local
+backend/.env
+
+# C++ build artefacts
+client-cpp/build/
+client-cpp/.cmake/
+*.o
+*.a
+*.so
+*.dylib
+CMakeCache.txt
+CMakeFiles/
+
+# Qt Creator
+*.pro.user
+*.qbs.user
+*.creator.user
+
+# Node / Hardhat
+node_modules/
+blockchain/node_modules/
+blockchain/artifacts/
+blockchain/cache/
+blockchain/typechain-types/
+
+# Frontend (no build step currently)
+frontend/node_modules/
+
+# Docker
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

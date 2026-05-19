@@ -1,0 +1,19 @@
+{
+  "name": "securemsg-blockchain",
+  "version": "0.1.0",
+  "description": "Hardhat project for the SecureMsg MessageDigest smart contract (Ethereum Sepolia)",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "node": "hardhat node",
+    "clean": "hardhat clean"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}

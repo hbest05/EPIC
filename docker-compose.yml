@@ -1,0 +1,80 @@
+version: "3.9"
+
+# SecureMsg — local development stack
+#
+# Services:
+#   api      — FastAPI backend (auto-reloads on code change in dev mode)
+#   db       — PostgreSQL 16
+#   redis    — Redis 7 (blockchain write queue)
+#
+# Usage:
+#   docker compose up --build        # start all services
+#   docker compose down -v           # stop and delete volumes
+#   docker compose logs -f api       # tail backend logs
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # FastAPI backend
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://securemsg:securemsg@db:5432/securemsg
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: "dev-secret-change-in-production"
+      # TODO: Set ETH_RPC_URL, CONTRACT_ADDRESS, ETH_PRIVATE_KEY for blockchain
+    volumes:
+      # Mount source for hot-reload in development
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: securemsg
+      POSTGRES_PASSWORD: securemsg
+      POSTGRES_DB: securemsg
+    ports:
+      - "5432:5432"     # expose for local DB tools (TablePlus, psql)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U securemsg -d securemsg"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis — blockchain write queue (streams)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"     # expose for local inspection (redis-cli)
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes   # enable AOF persistence
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
