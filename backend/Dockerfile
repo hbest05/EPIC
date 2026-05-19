@@ -18,4 +18,5 @@ COPY . .
 
 # Run Alembic migrations then start Uvicorn
 # TODO: In production use gunicorn with uvicorn workers for multiple processes
-CMD ["sh", "-c", "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"]
+# Set APP_ENV=development to enable hot-reload (docker-compose does this automatically)
+CMD ["sh", "-c", "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 ${APP_ENV:+--reload}"]
