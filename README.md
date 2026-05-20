@@ -38,8 +38,10 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 
 | Property | Mechanism |
 |---|---|
-| End-to-end encryption | HPKE Mode_Auth (KEM: X25519, KDF: HKDF-SHA256, AEAD: AES-128-GCM) |
-| Message authenticity | HPKE Mode_Auth — sender private key authenticates encapsulation; server cannot forge messages |
+| End-to-end encryption | Signal Protocol — X3DH key agreement + Double Ratchet (AES-256-GCM per-message keys) |
+| Message authenticity | X3DH: DH1 = DH(IK_A, SPK_B) — mutual auth baked into handshake; Ed25519 signature on SPK proves bundle came from Bob |
+| Forward secrecy | Double Ratchet symmetric ratchet — fresh AES-256-GCM key per message, erased after use |
+| Post-compromise security | Double Ratchet DH ratchet — new X25519 keypair injected every round-trip, heals ratchet state after one undisturbed reply |
 | Password storage | Argon2id (64 MiB, 3 iterations, parallelism 4) |
 | Session tokens | Short-lived JWTs (HS256, 30 min expiry) |
 | Tamper-evidence | keccak256 hash of each ciphertext anchored to Ethereum |
@@ -63,12 +65,14 @@ EPIC/
 │       ├── database.py        SQLAlchemy async engine + session
 │       ├── models/
 │       │   ├── user.py        User ORM model
-│       │   └── message.py     Message ORM model
+│       │   ├── message.py     UserKey, Message, MessageAccess ORM models
+│       │   └── signal.py      Signal Protocol models — SignedPrekey,
+│       │                      OneTimePrekey, RatchetSession, SkippedMessageKey
 │       ├── schemas/
 │       │   ├── auth.py        Pydantic schemas for auth endpoints
 │       │   └── message.py     Pydantic schemas for message endpoints
 │       ├── routers/
-│       │   ├── auth.py        POST /register, POST /login, GET /me
+│       │   ├── auth.py        POST /register, POST /login, GET /me, prekey endpoints
 │       │   ├── messages.py    POST /send, GET /inbox, GET /{id}
 │       │   └── blockchain.py  GET /status/{id}, GET /verify/{id}
 │       └── services/
@@ -151,6 +155,21 @@ alembic upgrade head
 uvicorn main:app --reload
 ```
 
+### Database migrations
+
+Two migration steps are required:
+
+```bash
+# 1. Apply the initial schema (users, messages, user_keys, message_access)
+alembic upgrade head
+
+# 2. Generate and apply the Signal Protocol migration
+#    (signed_prekeys, one_time_prekeys, ratchet_sessions, skipped_message_keys,
+#     plus new columns on messages)
+alembic revision --autogenerate -m "signal protocol tables"
+alembic upgrade head
+```
+
 ---
 
 ## Running the Frontend
@@ -222,10 +241,11 @@ After deployment, set `CONTRACT_ADDRESS` in `backend/.env`.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| POST | `/api/auth/register` | No | Register with public keys |
+| POST | `/api/auth/register` | No | Register account and identity key |
 | POST | `/api/auth/login` | No | Get JWT token |
 | GET | `/api/auth/me` | JWT | Current user profile |
-| GET | `/api/auth/user/{u}/pubkeys` | No | Get a user's public keys |
+| POST | `/api/auth/prekeys` | JWT | Upload signed prekey + batch of one-time prekeys |
+| GET | `/api/auth/user/{u}/keybundle` | JWT | Fetch full X3DH key bundle for a user (IK + SPK + one OPK) |
 | POST | `/api/messages/send` | JWT | Send encrypted message |
 | GET | `/api/messages/inbox` | JWT | Retrieve received messages |
 | GET | `/api/messages/{id}` | JWT | Get a specific message |
@@ -238,45 +258,119 @@ Full interactive docs: `http://localhost:8000/docs` (Swagger UI)
 
 ## Encryption Scheme
 
-### Message Send Flow
+### Key bundle — what each user publishes to the server
 
-HPKE Mode_Auth binds the sender's static private key into the encapsulation so the recipient can verify the sender without a separate signature step.
+Before a user can receive messages, their client generates and uploads a key bundle:
+
+| Key | Type | Purpose |
+|---|---|---|
+| Identity Key (IK) | Long-term X25519 keypair | Used in X3DH DH operations; never rotates |
+| Signed Prekey (SPK) | X25519 keypair + Ed25519 signature by IK | Medium-term; rotated ~weekly |
+| One-Time Prekeys (OPKs) | Pool of ~100 X25519 keypairs | Each used exactly once, then deleted |
+
+The Ed25519 signature on the SPK lets Alice verify the bundle was created by Bob, not substituted by the server.
+
+### X3DH — Initial key agreement (first message to a new contact)
+
+X3DH (Extended Triple Diffie-Hellman) lets Alice establish a shared secret with Bob without Bob being online, using only his pre-published key bundle.
+
+```
+Alice                                Server                         Bob
+  │                                     │                            │
+  │  GET /api/auth/user/bob/keybundle ─►│                            │
+  │◄── { IK_B, SPK_B, sig_B, OPK_B } ──│  (Bob published these      │
+  │                                     │   when he registered)      │
+  │  Verify Ed25519 sig_B over SPK_B    │                            │
+  │  using IK_B                         │                            │
+  │                                     │                            │
+  │  Generate ephemeral keypair EK_A    │                            │
+  │                                     │                            │
+  │  DH1 = X25519(IK_A,  SPK_B)         │                            │
+  │  DH2 = X25519(EK_A,  IK_B )         │                            │
+  │  DH3 = X25519(EK_A,  SPK_B)         │                            │
+  │  DH4 = X25519(EK_A,  OPK_B)  ← omitted if OPK pool empty        │
+  │                                     │                            │
+  │  SK = HKDF-SHA256(DH1‖DH2‖DH3‖DH4) │                            │
+  │  SK seeds Double Ratchet root key   │                            │
+```
+
+Alice includes IK_A and EK_A in the first message header so Bob can recompute the same SK on his end.
+
+### Double Ratchet — Per-message key evolution
+
+After X3DH establishes the root key, every message uses the Double Ratchet to derive a unique encryption key:
+
+```
+Sending a message
+──────────────────
+(CK_send_next, MK) = HKDF(CK_send_current)
+ciphertext = AES-256-GCM(key=MK, plaintext, aad)
+erase MK immediately after use
+CK_send = CK_send_next
+
+Message header attached to every ciphertext:
+  ratchet_public_key   — sender's current DH ratchet public key
+  PN                   — length of previous sending chain
+  N                    — index of this message in the current chain
+
+Associated data (AAD) bound into every AES-256-GCM call:
+  IK_A ‖ IK_B ‖ ratchet_public_key ‖ PN ‖ N
+
+DH ratchet step (on first message after receiving a reply):
+  new X25519 keypair generated
+  (root_key, CK_send) = HKDF(root_key, DH(new_sk, remote_ratchet_pk))
+  — this re-seeds the chain from a fresh DH value, healing state
+    after a compromise within one round-trip
+```
+
+**Forward secrecy:** message keys are erased after use, so a future compromise of ratchet state cannot decrypt past messages.
+
+**Post-compromise security:** the DH ratchet injects fresh X25519 key material on every round-trip, bounding the damage from a state compromise to messages sent before the next undisturbed reply.
+
+### Out-of-order message handling
+
+Messages can arrive out of order. When message N+3 arrives before N+1, the receiver advances the ratchet to decrypt N+3 and stores the skipped keys for N+1 and N+2 in the `skipped_message_keys` table. They are used when the late messages arrive. A maximum of 1000 skipped keys per session is enforced in application logic.
+
+### Message send flow
 
 ```
 Sender (client)                          Server              Blockchain
     │                                      │                     │
-    ├── Fetch recipient's HPKE pubkey ───►│                     │
-    ├── HPKE.SetupAuthS(                  │                     │
-    │     sender_sk, recipient_pk,        │                     │
-    │     info, aad)                      │                     │
-    │   ──► (enc_blob, aead_ctx)          │                     │
-    ├── aead_ctx.Seal(plaintext) ──► ciphertext                  │
-    ├── POST /messages/send ────────────►  │                     │
-    │   { ciphertext, enc_blob, nonce }    │                     │
-    │                               store in DB                  │
-    │                               keccak256(ciphertext)        │
-    │                               push to Redis queue ────────►│
-    │                               return message_id            │
-    │◄───────────────────────────────────  │   XADD blockchain:queue
-    │                                      │   worker calls storeHash()
-    │                                      │◄────────────────────│
+    │  (if first message to recipient:)    │                     │
+    ├── GET /user/{u}/keybundle ─────────►│                     │
+    │◄── { IK_B, SPK_B, sig_B, OPK_B } ──│                     │
+    ├── Run X3DH → seed ratchet root key  │                     │
+    │                                      │                     │
+    ├── Double Ratchet step:               │                     │
+    │     (CK_next, MK) = HKDF(CK_send)   │                     │
+    │     ciphertext = AES-256-GCM(MK, m) │                     │
+    │     erase MK                         │                     │
+    │                                      │                     │
+    ├── POST /messages/send ─────────────►│                     │
+    │   { ciphertext, nonce,               │                     │
+    │     ratchet_public_key, PN, N }      │                     │
+    │                                store in DB                 │
+    │                                keccak256(ciphertext)       │
+    │                                push to Redis queue ───────►│
+    │◄── { message_id } ─────────────────│   worker: storeHash()│
 ```
 
-### Message Receive Flow
+### Message receive flow
 
 ```
 Recipient (client)                       Server
     │                                      │
-    ├── GET /messages/inbox ─────────────►  │
-    │◄──────────────────────────────────── │ { ciphertext, enc_blob, nonce, sender_pubkey }
-    ├── HPKE.SetupAuthR(                  │
-    │     enc_blob, recipient_sk,         │
-    │     sender_pk, info, aad)           │
-    │   ──► aead_ctx                      │
-    └── aead_ctx.Open(ciphertext) ──► plaintext
+    ├── GET /messages/inbox ─────────────►│
+    │◄── [ { ciphertext, nonce,            │
+    │         ratchet_public_key, PN, N,  │
+    │         sender IK } ]               │
+    │                                      │
+    ├── Locate or initialise ratchet       │
+    │   session for sender                 │
+    ├── Advance ratchet to chain N         │
+    │   (store any skipped keys)           │
+    └── AES-256-GCM.Open(ciphertext) → plaintext
 ```
-
-Associated data (aad) bound into every HPKE seal/open: `sender_id || recipient_id || timestamp || enc_blob`
 
 ---
 
