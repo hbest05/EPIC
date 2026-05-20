@@ -11,7 +11,7 @@ Responsibilities:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import auth, messages, blockchain
+# from app.routers import auth, messages, blockchain
 from app.database import engine
 
 app = FastAPI(
@@ -29,9 +29,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-app.include_router(messages.router, prefix="/api/messages", tags=["messages"])
-app.include_router(blockchain.router, prefix="/api/blockchain", tags=["blockchain"])
+# app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+# app.include_router(messages.router, prefix="/api/messages", tags=["messages"])
+# app.include_router(blockchain.router, prefix="/api/blockchain", tags=["blockchain"])
 
 
 @app.on_event("startup")
