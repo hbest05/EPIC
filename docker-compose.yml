@@ -27,6 +27,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://securemsg:securemsg@db:5432/securemsg
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET_KEY: "dev-secret-change-in-production"
+      APP_ENV: development
       # TODO: Set ETH_RPC_URL, CONTRACT_ADDRESS, ETH_PRIVATE_KEY for blockchain
     volumes:
       # Mount source for hot-reload in development

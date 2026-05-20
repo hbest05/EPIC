@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, String
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID, BYTEA
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -31,6 +31,17 @@ class Message(Base):
     hpke_enc_blob = Column(BYTEA, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     blockchain_tx_hash = Column(String, nullable=True)
+
+    # Double Ratchet header fields — populated by the sending ratchet service
+    ratchet_public_key = Column(String(512), nullable=True)        # sender's DH ratchet key (base64)
+    previous_chain_length = Column(Integer, nullable=True)         # PN: length of previous sending chain
+    message_index = Column(Integer, nullable=True)                 # N: index within current sending chain
+    session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("ratchet_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
     recipient = relationship("User", foreign_keys=[recipient_id], back_populates="received_messages")
