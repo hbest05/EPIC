@@ -51,7 +51,3 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
-
-#idk
-context.md
-.gitignore
