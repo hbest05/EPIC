@@ -114,7 +114,7 @@ EPIC/
 
 | Component | Requirements |
 |---|---|
-| Backend | Python 3.12+, Docker Desktop |
+| Backend | Python 3.12+, Docker Engine + Compose v2 (v2.27.0+) — spins up FastAPI, PostgreSQL 16, Redis 7 |
 | Frontend | Any modern browser (Chrome 133+ / Firefox 130+ for X25519) |
 | C++ client | Qt 6.6+, CMake 3.20+, libsodium, libcurl |
 | Blockchain | Node.js 20+, npm |
