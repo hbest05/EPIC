@@ -42,8 +42,11 @@ const STORE_NAME = "keys";
  * TODO: Implement and export from this module.
  */
 export async function generateKeyPair() {
-  // TODO: crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveKey"])
-  throw new Error("generateKeyPair: not implemented yet");
+  return crypto.subtle.generateKey(
+    { name: "X25519" },
+    false,              // private key non-extractable — stored as CryptoKey in IndexedDB only
+    ["deriveKey", "deriveBits"]
+  );
 }
 
 /**
@@ -53,8 +56,11 @@ export async function generateKeyPair() {
  * TODO: Implement and export from this module.
  */
 export async function generateSigningPair() {
-  // TODO: crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign"])
-  throw new Error("generateSigningPair: not implemented yet");
+  return crypto.subtle.generateKey(
+    { name: "Ed25519" },
+    false,              // private key non-extractable
+    ["sign"]            // public key automatically gets ["verify"]
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +138,10 @@ export async function verifySignature(signature, data, senderPublicKey) {
  * TODO: crypto.subtle.exportKey("spki", key) → base64
  */
 export async function exportPublicKey(key) {
-  throw new Error("exportPublicKey: not implemented yet");
+  // "raw" gives the bare 32-byte key — same format libsodium produces on the
+  // C++ client, so both clients send identical wire formats to the server.
+  const raw = await crypto.subtle.exportKey("raw", key);
+  return btoa(String.fromCharCode(...new Uint8Array(raw)));
 }
 
 // ---------------------------------------------------------------------------
@@ -155,14 +164,24 @@ function openDb() {
  * TODO: Implement.
  */
 export async function storePrivateKey(keyName, key) {
-  throw new Error("storePrivateKey: not implemented yet");
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).put(key, keyName);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
 }
 
 /**
  * Retrieve a CryptoKey from IndexedDB by `keyName`.
  * Returns null if not found.
- * TODO: Implement.
  */
 export async function loadPrivateKey(keyName) {
-  throw new Error("loadPrivateKey: not implemented yet");
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(STORE_NAME).objectStore(STORE_NAME).get(keyName);
+    req.onsuccess = () => resolve(req.result ?? null);
+    req.onerror = () => reject(req.error);
+  });
 }
