@@ -2,50 +2,78 @@ Message encryption:
 AES-256-GCM for message encryption (via Double Ratchet message keys)
 - AES-256 gives 256-bit key length; GCM gives authenticated encryption with 128-bit tag (forgery probability 2⁻¹²⁸ per attempt)
 - Nonces managed internally by the Double Ratchet — one fresh message key per message, used once then erased, so nonce reuse is structurally impossible
-
 Associated data (attached to every AEAD call):
 IK_A || IK_B — binds ciphertext to this specific session (prevents unknown key-share attack)
 Ratchet public key — binds ciphertext to the current DH epoch
 PN (previous chain length) + N (message index) — prevents reorder/replay attacks on the chain
 (Note: HPKE enc blob from old design dropped — X3DH + Double Ratchet header serves the same binding purpose)
-
 Key exchange — how 2 parties agree on shared secret:
 X3DH (Extended Triple Diffie-Hellman) — Signal specification
 - Bob prepublishes a key bundle to the server (IK, SPK, OPKs — see below)
 - Alice fetches the bundle and runs 4 DH operations asynchronously (Bob can be offline)
 - SK = HKDF-SHA256(DH1 || DH2 || DH3 || DH4) seeds the Double Ratchet root key
-- Implemented via libsignal (Python: python-libsignal bindings; C++: libsignal-protocol-c)
-
+- Implemented via custom Signal Protocol state machine in the Python crypto daemon (see crypto-daemon/); C++ client sends/receives opaque ciphertext via IPC socket — no crypto in the C++ layer
 Per-message key evolution — Double Ratchet Algorithm:
 - Symmetric ratchet: (CK_next, MK) = HKDF(CK_current) — advances per message, erases MK after use → forward secrecy
 - DH ratchet: fresh X25519 keypair injected every round-trip, re-seeds root key → post-compromise security (heals after 1 round trip)
 - Net result: compromise of one message key or full ratchet state does not expose past messages; future messages recover after one undisturbed reply
-
 Elliptic curve:
 X25519 (Curve25519) — used throughout X3DH and Double Ratchet DH steps
-
 Key bundle published per user (X3DH):
 Identity Key (IK) — long-term X25519 keypair + Ed25519 signing key, never rotates
 Signed Prekey (SPK) — X25519 keypair signed by Ed25519 IK, rotated ~weekly
 One-Time Prekeys (OPKs) — pool of ~100 X25519 keypairs, each used exactly once then deleted
 - OPK depletion fallback: X3DH drops to 3 DH ops (DH4 omitted), slightly weaker FS vs SPK leak
-
 Password hashing server side:
 Argon2id — memory: 64 MiB, iterations: 3, parallelism: 4 (~500ms on target hardware)
-
 Local client private key protection at rest:
-HKDF-SHA256(user_passphrase, salt_local, info="cs4455-local-key-enc-v1") → AES-256-GCM(sk)
-- Separate KDF parameters from server-side Argon2id intentionally — different threat model (stolen device vs server breach)
-
+Argon2id(user_passphrase, salt_local, m=65536, t=3, p=4) → 32-byte wrap_key → AES-256-GCM(sk)
+- Argon2id used (not HKDF) because the input is a low-entropy user passphrase — HKDF is not a password KDF and must not be used here
+- Separate salt and parameters from server-side Argon2id intentionally — different threat model (stolen device vs server breach)
+- C++ implementation note: libsodium's high-level crypto_pwhash API fixes parallelism to p=1; achieving p=4 requires the low-level Argon2 API. Deviation is negligible for this threat model and is acknowledged.
 Trust model between two parties:
 TOFU + SHA-256 fingerprint pinning over IK bytes
 - Server compromise can MitM first contact (before pinning) — this limitation is acknowledged explicitly
 - After pinning, a compromised server cannot substitute keys for existing contacts
-
 Sender auth:
 X3DH DH1 = DH(IK_A, SPK_B) — mutual authentication baked into the handshake
 Ed25519 signature on SPK by IK — Alice verifies the bundle came from Bob, not the server
 - Deniable: DH-based auth means Bob cannot prove to a third party that Alice sent a specific message (no transcript signatures)
-
 Internal hash:
-HKDF-SHA256 — used for SK derivation in X3DH, chain/message key derivation in Double Ratchet, and local key derivation
+HKDF-SHA256 — used for SK derivation in X3DH and chain/message key derivation in Double Ratchet
+(not used for local key derivation — see local key protection above)
+---
+ 
+Additions from threat model:
+ 
+Message padding:
+Fixed 256-byte blocks (PKCS#7-style) applied to plaintext before AEAD encryption
+- All messages indistinguishable by size on the wire — mitigates passive attacker traffic analysis
+- Stripped after AEAD decryption on the recipient side
+Cover traffic:
+Encrypted WebSocket heartbeat packets sent at randomised jitter intervals
+- Same 256-byte padded size as real messages — indistinguishable from real traffic
+- Reduces timing correlation between sender and recipient events
+- Residual: global passive adversary watching both endpoints simultaneously can still correlate statistically; mix network would eliminate this (out of scope — acknowledged)
+Replay and drop detection:
+Monotonic sequence counter N per sender-recipient pair, embedded in AEAD AAD
+- Repeated N → rejected as replay
+- Gap in N → dropped/suppressed message is auditable by recipient even if not preventable
+- Complements PN + N already in AAD above
+Blockchain integrity anchor:
+keccak256(message ciphertext) committed to Sepolia smart contract before delivery confirmation
+- Any server-side modification to stored ciphertext produces an on-chain hash mismatch — detectable by any client
+- Server cannot silently rewrite message history (class d threat) — blockchain is infrastructure-independent of server
+- Per-message hashing strategy: maximum granularity, every message individually verifiable
+- Transaction hash stored in DB for later retrieval by the standalone verification page
+- Verification page: user inputs content → page recomputes keccak256 → compares against on-chain record → PASS/FAIL
+Application-layer availability controls:
+Rate limiting — slowapi on FastAPI: auth endpoints 5 req/min, messaging 60 req/min per IP; returns HTTP 429 + Retry-After
+Intrusion prevention — fail2ban: bans IP at OS layer (iptables/nftables) after 5 auth failures in 10 min; ban duration 1 hour
+Redis request queuing — server degrades gracefully under load rather than crashing
+- These three operate at different layers (application, OS network, queue) as defence-in-depth against class (b) DoS
+- Residual: volumetric DDoS requires upstream CDN (out of scope — acknowledged)
+Metadata mitigations (honest-but-curious server):
+Timestamp bucketing — server metadata log stores timestamps in 15-min intervals only (exact timestamp lives inside AEAD ciphertext, server-invisible)
+Minimal retention policy — only delivery-necessary fields stored; purged after retention window
+- Residual: relay architecture means server always knows communication pairs; full elimination requires PIR (out of scope — acknowledged)

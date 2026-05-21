@@ -59,19 +59,39 @@ async function register() {
   const email    = document.getElementById("reg-email").value.trim();
   const password = document.getElementById("reg-password").value;
 
-  // TODO: implement once crypto.js key generation is complete
-  // const { publicKey: x25519Pub, privateKey: x25519Priv } = await generateKeyPair();
-  // const { publicKey: ed25519Pub, privateKey: ed25519Priv } = await generateSigningPair();
-  // const x25519_public_key = await exportPublicKey(x25519Pub);
-  // const ed25519_public_key = await exportPublicKey(ed25519Pub);
-  // await storePrivateKey("x25519", x25519Priv);
-  // await storePrivateKey("ed25519", ed25519Priv);
-  // await apiFetch("/auth/register", {
-  //   method: "POST",
-  //   body: JSON.stringify({ username, email, password, x25519_public_key, ed25519_public_key }),
-  // });
-  // await login(username, password);
-  console.warn("register: crypto.js not yet implemented");
+  try {
+    // Generate both long-term keypairs client-side — private keys never leave the browser
+    const { publicKey: x25519Pub, privateKey: x25519Priv } = await generateKeyPair();
+    const { publicKey: ed25519Pub, privateKey: ed25519Priv } = await generateSigningPair();
+
+    // Upload public keys and create account
+    await apiFetch("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({
+        username,
+        email,
+        password,
+        x25519_public_key: await exportPublicKey(x25519Pub),
+        ed25519_public_key: await exportPublicKey(ed25519Pub),
+      }),
+    });
+
+    // Persist private keys in IndexedDB only after server confirms the account
+    await storePrivateKey("x25519", x25519Priv);
+    await storePrivateKey("ed25519", ed25519Priv);
+
+    // Auto-login — sets httpOnly access_token cookie and readable csrf_token cookie
+    currentUser = await apiFetch("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    myPrivateKey = await loadPrivateKey("x25519");
+    mySigningKey = await loadPrivateKey("ed25519");
+    showApp();
+    startInboxPoller();
+  } catch (err) {
+    alert(err.message);
+  }
 }
 
 async function login() {
