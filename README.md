@@ -46,6 +46,7 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 | Session tokens | Short-lived JWTs (HS256, 30 min expiry) stored in an httpOnly, Secure, SameSite=Strict cookie — never readable by JavaScript |
 | CSRF protection | Double-submit cookie pattern — server sets a readable `csrf_token` cookie on login; every state-changing request must echo it in the `X-CSRF-Token` header |
 | Brute-force protection | slowapi: `/register` and `/login` rate-limited to 5 req/min per IP (HTTP 429 + Retry-After); 5 consecutive failures trigger a 1-hour lockout via Redis TTL counter |
+| HTTP security headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`, `Strict-Transport-Security: max-age=31536000; includeSubDomains` (production only) — applied globally via middleware |
 | Tamper-evidence | keccak256 hash of each ciphertext anchored to Ethereum |
 
 ---
@@ -77,6 +78,9 @@ EPIC/
 │       │   ├── auth.py        POST /register, POST /login, GET /me, prekey endpoints
 │       │   ├── messages.py    POST /send, GET /inbox, GET /{id}
 │       │   └── blockchain.py  GET /status/{id}, GET /verify/{id}
+│       ├── middleware/
+│       │   ├── csrf.py           Double-submit CSRF validation (all state-changing requests)
+│       │   └── security_headers.py  X-Content-Type-Options, X-Frame-Options, CSP, HSTS, etc.
 │       └── services/
 │           ├── auth_service.py   Argon2id hashing + JWT lifecycle
 │           ├── rate_limit.py     slowapi Limiter singleton (shared by all routers)

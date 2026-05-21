@@ -14,6 +14,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.middleware.csrf import CSRFMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.routers import auth
 # from app.routers import messages, blockchain
 from app.database import engine
@@ -29,9 +30,13 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Middleware is applied in reverse registration order (last added = outermost).
-# CSRF runs inside CORS so the CORS preflight OPTIONS requests are handled first
-# and never reach the CSRF check.
+# Middleware executes in reverse registration order (last added = outermost).
+# Outermost runs first on request and last on response — so SecurityHeaders
+# wraps everything and adds its headers to every response, including error
+# responses from inner layers (CSRF 403, rate-limiter 429, etc.).
+#
+# Execution order on request:  SecurityHeaders → CSRF → CORS → route handler
+# Execution order on response: route handler  → CORS → CSRF → SecurityHeaders
 app.add_middleware(CSRFMiddleware)
 
 # TODO: Restrict origins to the deployed frontend URL in production
@@ -42,6 +47,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Must be added last — becomes outermost layer, stamps headers onto every response
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 # app.include_router(messages.router, prefix="/api/messages", tags=["messages"])
