@@ -4,6 +4,8 @@
 
 #include "Client.hpp"
 #include <QDebug>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QVBoxLayout>
 #include <QLabel>
 #include <curl/curl.h>
@@ -67,14 +69,32 @@ void Client::registerUser(const QString& username, const QString& email, const Q
 
 void Client::login(const QString& username, const QString& password)
 {
-    // TODO: Build JSON body { username, password }
-    // TODO: httpPost("/auth/login", body) → parse JWT from response
-    // TODO: Store JWT in m_jwtToken
-    // TODO: Load keypair from keyfile: m_localUser->loadKeyFile(...)
-    // TODO: showChatView()
-    Q_UNUSED(username)
-    Q_UNUSED(password)
-    qWarning() << "Client::login: not implemented yet";
+    QJsonObject body;
+    body["username"] = username;
+    body["password"] = password;
+    const QByteArray jsonBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
+
+    const QByteArray response = httpPost("/auth/login", jsonBody);
+    if (response.isEmpty()) {
+        qWarning() << "Client::login: empty response from server";
+        return;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(response);
+    if (doc.isNull() || !doc.isObject()) {
+        qWarning() << "Client::login: invalid JSON response";
+        return;
+    }
+
+    const QString token = doc.object().value("access_token").toString();
+    if (token.isEmpty()) {
+        qWarning() << "Client::login: missing access_token in response";
+        return;
+    }
+
+    m_jwtToken = token;
+    m_localUser = std::make_unique<User>(username);
+    showChatView();
 }
 
 void Client::logout()
@@ -132,11 +152,24 @@ QByteArray Client::httpPost(const QString& endpoint, const QByteArray& jsonBody)
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonBody.size());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
 
-    // TODO: Add Authorization header when m_jwtToken is set
-    // TODO: Add Content-Type: application/json header
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    if (!m_jwtToken.isEmpty()) {
+        const std::string authHeader = "Authorization: Bearer " + m_jwtToken.toStdString();
+        headers = curl_slist_append(headers, authHeader.c_str());
+    }
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-    curl_easy_perform(curl);
+    const CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        qWarning() << "httpPost" << endpoint << "failed:" << curl_easy_strerror(res);
+        response.clear();
+    }
+
+    curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     return response;
 }
@@ -151,10 +184,23 @@ QByteArray Client::httpGet(const QString& endpoint)
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
 
-    // TODO: Add Authorization: Bearer <m_jwtToken> header
+    curl_slist* headers = nullptr;
+    if (!m_jwtToken.isEmpty()) {
+        const std::string authHeader = "Authorization: Bearer " + m_jwtToken.toStdString();
+        headers = curl_slist_append(headers, authHeader.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    }
 
-    curl_easy_perform(curl);
+    const CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        qWarning() << "httpGet" << endpoint << "failed:" << curl_easy_strerror(res);
+        response.clear();
+    }
+
+    curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     return response;
 }
