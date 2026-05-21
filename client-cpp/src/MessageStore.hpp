@@ -1,20 +1,15 @@
 #pragma once
 
 /**
- * MessageStore.hpp — Local encrypted message cache and crypto orchestrator.
+ * MessageStore.hpp — Local message cache.
  *
  * Responsibilities:
- *   1. Encrypt outgoing messages (ECDH + XSalsa20-Poly1305 via libsodium)
- *   2. Decrypt incoming messages
- *   3. Verify Ed25519 signatures on received messages
- *   4. Cache decrypted messages in memory for the UI
- *   5. Optionally persist the cache to a local SQLite DB (future work)
+ *   1. Cache messages in memory for the UI
+ *   2. Delegate encrypt/decrypt to the Python crypto daemon via Unix socket
+ *   3. Optionally persist the cache to a local SQLite DB (future work)
  *
- * Crypto operations use libsodium's combined-mode box:
- *   crypto_box_easy()      — encrypt with ephemeral keypair + recipient pubkey
- *   crypto_box_open_easy() — decrypt with own private key + ephemeral pubkey
- *   crypto_sign_detached() — sign ciphertext with sender's Ed25519 key
- *   crypto_sign_verify_detached() — verify signature against sender's pubkey
+ * Crypto operations are NOT performed here — they are delegated to the
+ * Python crypto daemon over a Unix domain socket (IPC).
  */
 
 #include <QObject>
@@ -32,31 +27,27 @@ public:
     explicit MessageStore(QObject* parent = nullptr);
 
     /**
-     * Encrypt `plaintext` for `recipient` and populate a Message object
-     * ready for transmission.
+     * Request encryption of `plaintext` for `recipient` via the Python crypto
+     * daemon and return a Message ready for transmission.
      *
-     * Steps (TODO):
-     *   1. crypto_kx_client_session_keys() or generate ephemeral keypair
-     *   2. crypto_box_easy(ciphertext, plaintext, nonce, recipient_pk, ephemeral_sk)
-     *   3. crypto_sign_detached(signature, ciphertext, sender_signing_sk)
-     *   4. Return Message with ciphertext, ephemeralPublicKey, signature set
+     * TODO: delegate to Python crypto daemon via Unix socket
      *
      * @param plaintext UTF-8 message text
      * @param recipient Must have x25519PublicKey populated
-     * @param sender    Must have x25519PrivateKey and ed25519PrivateKey populated
+     * @param sender    Local user (daemon holds the private key)
      */
     Message encryptMessage(const QString& plaintext, const User& recipient, const User& sender);
 
     /**
-     * Decrypt an incoming Message. Verifies the sender's signature before
-     * attempting decryption — returns false if signature is invalid.
+     * Request decryption of an incoming Message via the Python crypto daemon.
+     * Returns false if the daemon reports a failure.
      *
-     * TODO: Implement using crypto_sign_verify_detached + crypto_box_open_easy.
+     * TODO: delegate to Python crypto daemon via Unix socket
      *
-     * @param message   Message with ciphertext, ephemeralPublicKey, signature
+     * @param message   Message with ciphertext and ratchet header
      * @param sender    Remote user with ed25519PublicKey and x25519PublicKey
-     * @param localUser Must have x25519PrivateKey populated
-     * @returns true on success, false on signature or decryption failure
+     * @param localUser Local user (daemon holds the private key)
+     * @returns true on success, false on decryption failure
      */
     bool decryptMessage(Message& message, const User& sender, const User& localUser);
 
