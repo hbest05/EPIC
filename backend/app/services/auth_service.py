@@ -1,83 +1,118 @@
 """
-Authentication service — password hashing and JWT lifecycle.
+Authentication service — password hashing, JWT lifecycle, and request dependencies.
 
-Password hashing strategy: Argon2id (winner of the Password Hashing Competition).
-  - Memory: 64 MiB  (resist GPU cracking)
-  - Iterations: 3
-  - Parallelism: 4
-  These parameters should be tuned to ~500ms on the production server.
-
-JWT strategy:
-  - Short-lived access tokens (30 min) signed with HS256
-  - TODO: Add refresh token rotation with Redis blocklist for revocation
+Password hashing: Argon2id (m=65536, t=3, p=4) via passlib.
+JWT: HS256, short-lived (see config for expiry). Token is carried in an httpOnly
+cookie — never returned in a response body or read by JavaScript.
+CSRF: double-submit cookie pattern. A separate readable csrf_token cookie is set
+on login; every state-changing request must echo it in the X-CSRF-Token header.
 """
 
+import hmac
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, Request, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import get_db
 
-# Argon2id via passlib
+# ---------------------------------------------------------------------------
+# Password hashing — Argon2id
+# ---------------------------------------------------------------------------
+
 pwd_context = CryptContext(
     schemes=["argon2"],
     deprecated="auto",
-    argon2__memory_cost=65536,   # 64 MiB
+    argon2__memory_cost=65536,  # 64 MiB
     argon2__time_cost=3,
     argon2__parallelism=4,
 )
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+def hash_password(plain: str) -> str:
+    return pwd_context.hash(plain)
 
 
-def hash_password(plain_password: str) -> str:
-    """Hash a plaintext password with Argon2id. Returns the full encoded hash."""
-    # TODO: Validate password entropy before hashing (zxcvbn or similar)
-    return pwd_context.hash(plain_password)
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Return True if plain_password matches the stored Argon2id hash."""
-    return pwd_context.verify(plain_password, hashed_password)
-
+# ---------------------------------------------------------------------------
+# JWT
+# ---------------------------------------------------------------------------
 
 def create_access_token(subject: str, expires_delta: Optional[timedelta] = None) -> str:
-    """
-    Create a signed JWT with `sub` set to the user's UUID string.
-    The token carries no sensitive data — only the user ID.
-    """
+    """Create a signed JWT with `sub` set to the user's UUID string."""
     expire = datetime.utcnow() + (
         expires_delta or timedelta(minutes=settings.jwt_access_token_expire_minutes)
     )
-    payload = {"sub": subject, "exp": expire}
-    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
-
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    """
-    FastAPI dependency — decode and validate the bearer JWT, return the user.
-
-    TODO:
-    - Decode JWT
-    - Check Redis blocklist for revoked tokens
-    - Fetch and return User from DB by ID in `sub` claim
-    """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+    return jwt.encode(
+        {"sub": subject, "exp": expire},
+        settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
     )
+
+
+# ---------------------------------------------------------------------------
+# CSRF
+# ---------------------------------------------------------------------------
+
+def generate_csrf_token() -> str:
+    return secrets.token_hex(32)
+
+
+async def verify_csrf(request: Request) -> None:
+    """
+    Dependency — validate the double-submit CSRF token on state-changing requests.
+    Raises 403 if the X-CSRF-Token header does not match the csrf_token cookie.
+    """
+    cookie = request.cookies.get("csrf_token")
+    header = request.headers.get("X-CSRF-Token")
+    if not cookie or not header or not hmac.compare_digest(cookie, header):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF validation failed")
+
+
+# ---------------------------------------------------------------------------
+# Current-user dependency
+# ---------------------------------------------------------------------------
+
+_credentials_exception = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Could not validate credentials",
+)
+
+
+async def get_current_user(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    FastAPI dependency — reads the access_token httpOnly cookie, validates the JWT,
+    and returns the User ORM object. Raises 401 on any failure.
+    """
+    from app.models.user import User  # local import avoids circular dependency at module load
+
+    token = request.cookies.get("access_token")
+    if not token:
+        raise _credentials_exception
+
     try:
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
         user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
+        if not user_id:
+            raise _credentials_exception
     except JWTError:
-        raise credentials_exception
+        raise _credentials_exception
 
-    # TODO: Fetch user from DB and return
-    raise HTTPException(status_code=501, detail="DB lookup not yet implemented")
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise _credentials_exception
+
+    return user

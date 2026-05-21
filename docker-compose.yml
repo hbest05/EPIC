@@ -25,7 +25,7 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://securemsg:securemsg@db:5432/securemsg
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:alphaandthecryptmunks@redis:6379/0
       JWT_SECRET_KEY: "dev-secret-change-in-production"
       APP_ENV: development
       # TODO: Set ETH_RPC_URL, CONTRACT_ADDRESS, ETH_PRIVATE_KEY for blockchain
@@ -64,13 +64,12 @@ services:
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
+    container_name: redis
     ports:
-      - "6379:6379"     # expose for local inspection (redis-cli)
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes   # enable AOF persistence
+      - "127.0.0.1:6379:6379"   # bind to localhost only — never expose externally
+    command: redis-server --requirepass alphaandthecryptmunks --save "" --appendonly no
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "alphaandthecryptmunks", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -78,4 +77,3 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:

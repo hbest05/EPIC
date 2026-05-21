@@ -31,7 +31,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     last_seen_at = Column(DateTime, nullable=True)
 
-    key = relationship("UserKey", back_populates="user", uselist=False)
+    keys = relationship("UserKey", back_populates="user")
     sent_messages = relationship("Message", foreign_keys="Message.sender_id", back_populates="sender")
     received_messages = relationship("Message", foreign_keys="Message.recipient_id", back_populates="recipient")
     access_records = relationship("MessageAccess", foreign_keys="MessageAccess.user_id", back_populates="user")

@@ -11,8 +11,10 @@ Responsibilities:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# from app.routers import auth, messages, blockchain
+from app.routers import auth
+# from app.routers import messages, blockchain
 from app.database import engine
+from app.services.redis_service import init_redis, close_redis
 
 app = FastAPI(
     title="SecureMsg API",
@@ -29,22 +31,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 # app.include_router(messages.router, prefix="/api/messages", tags=["messages"])
 # app.include_router(blockchain.router, prefix="/api/blockchain", tags=["blockchain"])
 
 
 @app.on_event("startup")
 async def startup_event():
-    # TODO: Initialise Redis connection pool via redis_service
+    await init_redis()
     # TODO: Verify DB connectivity
-    pass
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    # TODO: Close Redis connection pool gracefully
-    pass
+    await close_redis()
 
 
 @app.get("/health")
