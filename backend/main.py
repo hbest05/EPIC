@@ -15,8 +15,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.middleware.csrf import CSRFMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
-from app.routers import auth
-# from app.routers import messages, blockchain
+from app.routers import auth, messages
 from app.database import engine
 from app.services.rate_limit import limiter
 from app.services.redis_service import init_redis, close_redis
@@ -52,7 +51,7 @@ app.add_middleware(
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-# app.include_router(messages.router, prefix="/api/messages", tags=["messages"])
+app.include_router(messages.router, prefix="/api/messages", tags=["messages"])
 # app.include_router(blockchain.router, prefix="/api/blockchain", tags=["blockchain"])
 
 
