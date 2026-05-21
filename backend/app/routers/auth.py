@@ -27,7 +27,6 @@ from app.services.auth_service import (
     get_current_user,
     hash_password,
     pwd_context,
-    verify_csrf,
     verify_password,
 )
 from app.services.rate_limit import limiter
@@ -150,7 +149,7 @@ async def login(request: Request, body: LoginRequest, response: Response, db: As
     return LoginResponse(id=str(user.id), username=user.username)
 
 
-@router.post("/logout", dependencies=[Depends(verify_csrf)])
+@router.post("/logout")
 async def logout(response: Response):
     response.delete_cookie("access_token")
     response.delete_cookie("csrf_token")
@@ -165,7 +164,6 @@ async def get_me(current_user: User = Depends(get_current_user)):
 @router.post(
     "/prekeys",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(verify_csrf)],
 )
 async def upload_prekeys(
     body: UploadPrekeysRequest,
