@@ -23,7 +23,7 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 │                   FastAPI Backend                         │
 │   /api/auth  │  /api/messages  │  /api/blockchain         │
 │                  PostgreSQL (SQLAlchemy + asyncpg)         │
-│                  Redis Stream (blockchain write queue)     │
+│                  Redis (blockchain write queue + auth rate-limit counters) │
 └──────────────────────────────┬────────────────────────────┘
                                │  Async worker
                                ▼
@@ -45,6 +45,7 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 | Password storage | Argon2id (64 MiB, 3 iterations, parallelism 4) |
 | Session tokens | Short-lived JWTs (HS256, 30 min expiry) stored in an httpOnly, Secure, SameSite=Strict cookie — never readable by JavaScript |
 | CSRF protection | Double-submit cookie pattern — server sets a readable `csrf_token` cookie on login; every state-changing request must echo it in the `X-CSRF-Token` header |
+| Brute-force protection | slowapi: `/register` and `/login` rate-limited to 5 req/min per IP (HTTP 429 + Retry-After); 5 consecutive failures trigger a 1-hour lockout via Redis TTL counter |
 | Tamper-evidence | keccak256 hash of each ciphertext anchored to Ethereum |
 
 ---
@@ -78,7 +79,8 @@ EPIC/
 │       │   └── blockchain.py  GET /status/{id}, GET /verify/{id}
 │       └── services/
 │           ├── auth_service.py   Argon2id hashing + JWT lifecycle
-│           └── redis_service.py  Blockchain write queue (Redis streams)
+│           ├── rate_limit.py     slowapi Limiter singleton (shared by all routers)
+│           └── redis_service.py  Blockchain write queue + auth failure counters
 │
 ├── frontend/                  Browser-based web client
 │   ├── index.html             Single-page app shell
@@ -246,8 +248,8 @@ After deployment, set `CONTRACT_ADDRESS` in `backend/.env`.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| POST | `/api/auth/register` | No | Register account, upload X25519 identity key and Ed25519 signing key |
-| POST | `/api/auth/login` | No | Verify credentials; sets httpOnly `access_token` cookie and readable `csrf_token` cookie |
+| POST | `/api/auth/register` | No | Register account, upload X25519 identity key and Ed25519 signing key — rate limited 5 req/min |
+| POST | `/api/auth/login` | No | Verify credentials; sets httpOnly `access_token` cookie and readable `csrf_token` cookie — rate limited 5 req/min; 5 failures → 1-hour lockout |
 | POST | `/api/auth/logout` | Cookie + CSRF | Clear session cookies |
 | GET | `/api/auth/me` | Cookie | Current user profile |
 | POST | `/api/auth/prekeys` | Cookie + CSRF | Upload signed prekey + batch of one-time prekeys |

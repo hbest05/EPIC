@@ -60,6 +60,44 @@ async def push_hash_to_queue(message_id: str, keccak_hash: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Auth failure tracking — application-layer equivalent of fail2ban
+# ---------------------------------------------------------------------------
+
+_AUTH_FAIL_PREFIX = "auth:fail:"
+_AUTH_WINDOW_SEC = 600    # 10-minute window before counter resets
+_AUTH_LOCKOUT_SEC = 3600  # 1-hour lockout once threshold is reached
+AUTH_MAX_FAILURES = 5     # exported — used in auth router to reject before DB work
+
+
+async def record_auth_failure(ip: str) -> None:
+    """
+    Increment the failed-login counter for an IP.
+
+    TTL logic:
+      - First failure: starts a 10-min window (key expires, counter resets).
+      - 5th failure: extends TTL to 1 hour (lockout begins).
+    """
+    redis = get_redis()
+    key = f"{_AUTH_FAIL_PREFIX}{ip}"
+    count = await redis.incr(key)
+    if count == 1:
+        await redis.expire(key, _AUTH_WINDOW_SEC)
+    elif count >= AUTH_MAX_FAILURES:
+        await redis.expire(key, _AUTH_LOCKOUT_SEC)
+
+
+async def get_auth_failure_count(ip: str) -> int:
+    """Return current failure count for an IP (0 if no record)."""
+    val = await get_redis().get(f"{_AUTH_FAIL_PREFIX}{ip}")
+    return int(val) if val else 0
+
+
+async def clear_auth_failures(ip: str) -> None:
+    """Delete the failure counter on a successful login."""
+    await get_redis().delete(f"{_AUTH_FAIL_PREFIX}{ip}")
+
+
+# ---------------------------------------------------------------------------
 # TODO: Blockchain consumer loop
 #
 # Implement a background worker that:
