@@ -12,7 +12,8 @@ class UserKey(Base):
     __tablename__ = "user_keys"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    key_type = Column(String(16), nullable=False)   # "x25519" or "ed25519"
     public_key = Column(BYTEA, nullable=False)
     key_fingerprint = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

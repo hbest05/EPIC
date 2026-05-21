@@ -47,8 +47,13 @@ class Settings(BaseSettings):
     # Used by the blockchain write-queue (Redis Streams).  The redis-py
     # client accepts this URL format directly.
     redis_url: str = Field(
-        default="redis://redis:6379/0",
+        default="redis://:alphaandthecryptmunks@redis:6379/0",
         description="Redis connection URL used by the blockchain write queue",
+    )
+
+    app_env: str = Field(
+        default="production",
+        description="Runtime environment — set to 'development' to disable secure cookie flag for localhost",
     )
 
     # ------------------------------------------------------------------

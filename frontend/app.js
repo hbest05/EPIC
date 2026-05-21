@@ -1,19 +1,10 @@
 /**
- * app.js — SecureMsg web client application logic
+ * app.js — SecureMsg web client
  *
- * Responsibilities:
- *   - Auth: register (generate keys, POST /api/auth/register), login, logout
- *   - Key management: load private keys from IndexedDB on startup
- *   - Inbox: poll GET /api/messages/inbox, decrypt messages, render them
- *   - Send: encrypt plaintext with recipient's public key, POST /api/messages/send
- *   - Blockchain status: show on-chain confirmation badge next to each message
- *
- * State held in memory (not persisted across page reloads except for keys):
- *   currentUser      — { id, username, token }
- *   contacts         — Map<username, { x25519PublicKey, ed25519PublicKey }>
- *   activeRecipient  — username string
- *   myPrivateKey     — X25519 CryptoKey (loaded from IndexedDB)
- *   mySigningKey     — Ed25519 CryptoKey (loaded from IndexedDB)
+ * Auth: httpOnly cookie (set by server on login) + double-submit CSRF token.
+ * All requests use credentials: 'include' so cookies are sent automatically.
+ * State-changing requests (POST/PUT/DELETE) attach the X-CSRF-Token header
+ * by reading the readable csrf_token cookie.
  */
 
 import {
@@ -22,27 +13,21 @@ import {
   exportPublicKey,
   encryptMessage,
   decryptMessage,
-  signMessage,
-  verifySignature,
   storePrivateKey,
   loadPrivateKey,
 } from "./crypto.js";
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const API_BASE = "http://localhost:8000/api";
-const POLL_INTERVAL_MS = 5000; // TODO: Replace polling with WebSocket
+const POLL_INTERVAL_MS = 5000; // TODO: replace with WebSocket
 
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
 
-let currentUser = null;
-let myPrivateKey = null;
-let mySigningKey = null;
-const contacts = new Map();
+let currentUser = null;        // { id, username }
+let myPrivateKey = null;       // X25519 CryptoKey (loaded from IndexedDB)
+let mySigningKey = null;       // Ed25519 CryptoKey (loaded from IndexedDB)
+const contacts = new Map();    // username → { x25519PublicKey, ed25519PublicKey }
 let activeRecipient = null;
 let inboxPoller = null;
 
@@ -51,13 +36,14 @@ let inboxPoller = null;
 // ---------------------------------------------------------------------------
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const token = localStorage.getItem("jwt");
-  if (token) {
-    // TODO: Validate token expiry client-side before trying to load the app
-    // TODO: Load user profile from /api/auth/me
-    // TODO: Load private keys from IndexedDB
+  try {
+    // GET /me succeeds if the access_token cookie is still valid
+    currentUser = await apiFetch("/auth/me");
+    myPrivateKey = await loadPrivateKey("x25519");
+    mySigningKey = await loadPrivateKey("ed25519");
     showApp();
-  } else {
+    startInboxPoller();
+  } catch {
     showAuth();
   }
 
@@ -70,35 +56,52 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 async function register() {
   const username = document.getElementById("reg-username").value.trim();
-  const email = document.getElementById("reg-email").value.trim();
+  const email    = document.getElementById("reg-email").value.trim();
   const password = document.getElementById("reg-password").value;
 
-  // TODO: Generate X25519 and Ed25519 keypairs via crypto.js
-  // TODO: Store private keys in IndexedDB
-  // TODO: Export public keys as base64
-  // TODO: POST /api/auth/register with { username, email, password, x25519_public_key, ed25519_public_key }
-  // TODO: On success → auto-login
-  alert("Register: not implemented yet");
+  // TODO: implement once crypto.js key generation is complete
+  // const { publicKey: x25519Pub, privateKey: x25519Priv } = await generateKeyPair();
+  // const { publicKey: ed25519Pub, privateKey: ed25519Priv } = await generateSigningPair();
+  // const x25519_public_key = await exportPublicKey(x25519Pub);
+  // const ed25519_public_key = await exportPublicKey(ed25519Pub);
+  // await storePrivateKey("x25519", x25519Priv);
+  // await storePrivateKey("ed25519", ed25519Priv);
+  // await apiFetch("/auth/register", {
+  //   method: "POST",
+  //   body: JSON.stringify({ username, email, password, x25519_public_key, ed25519_public_key }),
+  // });
+  // await login(username, password);
+  console.warn("register: crypto.js not yet implemented");
 }
 
 async function login() {
   const username = document.getElementById("login-username").value.trim();
   const password = document.getElementById("login-password").value;
 
-  // TODO: POST /api/auth/login with { username, password }
-  // TODO: Store JWT in localStorage
-  // TODO: Load private keys from IndexedDB (user must have registered on this browser)
-  // TODO: Start inbox polling
-  alert("Login: not implemented yet");
+  try {
+    currentUser = await apiFetch("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    myPrivateKey = await loadPrivateKey("x25519");
+    mySigningKey = await loadPrivateKey("ed25519");
+    showApp();
+    startInboxPoller();
+  } catch (err) {
+    alert(err.message);
+  }
 }
 
-function logout() {
-  localStorage.removeItem("jwt");
-  currentUser = null;
-  myPrivateKey = null;
-  mySigningKey = null;
-  clearInterval(inboxPoller);
-  showAuth();
+async function logout() {
+  try {
+    await apiFetch("/auth/logout", { method: "POST" });
+  } finally {
+    currentUser = null;
+    myPrivateKey = null;
+    mySigningKey = null;
+    stopInboxPoller();
+    showAuth();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -106,27 +109,25 @@ function logout() {
 // ---------------------------------------------------------------------------
 
 async function sendMessage() {
-  if (!activeRecipient) return;
-
-  const plaintext = document.getElementById("plaintext-input").value.trim();
-  if (!plaintext) return;
-
-  // TODO: Look up recipient's X25519 public key from contacts Map
-  // TODO: encryptMessage(plaintext, recipientPublicKey) → { ciphertext, ephemeralPublicKey, iv }
-  // TODO: signMessage(ciphertextBytes, mySigningKey) → signature
-  // TODO: POST /api/messages/send with ciphertext, ephemeralPublicKey, signature
-  // TODO: Append sent message to UI
-  alert("sendMessage: not implemented yet");
+  // TODO: implement once crypto.js encryption is complete
+  console.warn("sendMessage: crypto.js not yet implemented");
 }
 
 async function fetchInbox() {
-  // TODO: GET /api/messages/inbox with Authorization: Bearer <token>
-  // TODO: For each new message:
-  //   1. Fetch sender's public keys if not cached in contacts Map
-  //   2. verifySignature(signature, ciphertext, senderPublicKey)
-  //   3. decryptMessage(ciphertext, ephemeralPublicKey, iv, myPrivateKey) → plaintext
-  //   4. Render message in UI
-  //   5. Show blockchain confirmation badge if message.blockchain_confirmed
+  // TODO: implement once crypto.js decryption is complete
+}
+
+// ---------------------------------------------------------------------------
+// Inbox polling
+// ---------------------------------------------------------------------------
+
+function startInboxPoller() {
+  inboxPoller = setInterval(fetchInbox, POLL_INTERVAL_MS);
+}
+
+function stopInboxPoller() {
+  clearInterval(inboxPoller);
+  inboxPoller = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,24 +157,40 @@ function attachEventListeners() {
     document.getElementById("register-form").style.display = "none";
     document.getElementById("login-form").style.display = "block";
   });
-  // TODO: btn-add-contact → fetch pubkeys and add to contacts Map
+  // TODO: btn-add-contact → fetch keybundle and cache in contacts Map
 }
 
 // ---------------------------------------------------------------------------
 // API helper
 // ---------------------------------------------------------------------------
 
+function getCsrfToken() {
+  const match = document.cookie
+    .split("; ")
+    .find(row => row.startsWith("csrf_token="));
+  return match ? match.split("=")[1] : null;
+}
+
 async function apiFetch(path, options = {}) {
-  const token = localStorage.getItem("jwt");
-  const headers = {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...options.headers,
-  };
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const method = (options.method || "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...options.headers };
+
+  // Attach CSRF token on all state-changing requests
+  if (["POST", "PUT", "DELETE", "PATCH"].includes(method)) {
+    const csrf = getCsrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+    credentials: "include",  // send httpOnly cookie on every request
+  });
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || `HTTP ${res.status}`);
   }
+
   return res.json();
 }
