@@ -30,6 +30,7 @@ Local client private key protection at rest:
 Argon2id(user_passphrase, salt_local, m=65536, t=3, p=4) → 32-byte wrap_key → AES-256-GCM(sk)
 - Argon2id used (not HKDF) because the input is a low-entropy user passphrase — HKDF is not a password KDF and must not be used here
 - Separate salt and parameters from server-side Argon2id intentionally — different threat model (stolen device vs server breach)
+- C++ implementation note: libsodium's high-level crypto_pwhash API fixes parallelism to p=1; achieving p=4 requires the low-level Argon2 API. Deviation is negligible for this threat model and is acknowledged.
 Trust model between two parties:
 TOFU + SHA-256 fingerprint pinning over IK bytes
 - Server compromise can MitM first contact (before pinning) — this limitation is acknowledged explicitly
