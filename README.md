@@ -15,7 +15,7 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 │  │  Web Client      │        │  Qt Desktop Client       │   │
 │  │  (JS + WebCrypto)│        │  (C++ + libsodium)       │   │
 │  └────────┬─────────┘        └────────────┬─────────────┘   │
-│           │  HTTPS + JWT                  │                  │
+│           │  HTTPS + cookie auth          │                  │
 └───────────┼───────────────────────────────┼─────────────────┘
             │                               │
             ▼                               ▼
@@ -43,7 +43,8 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 | Forward secrecy | Double Ratchet symmetric ratchet — fresh AES-256-GCM key per message, erased after use |
 | Post-compromise security | Double Ratchet DH ratchet — new X25519 keypair injected every round-trip, heals ratchet state after one undisturbed reply |
 | Password storage | Argon2id (64 MiB, 3 iterations, parallelism 4) |
-| Session tokens | Short-lived JWTs (HS256, 30 min expiry) |
+| Session tokens | Short-lived JWTs (HS256, 30 min expiry) stored in an httpOnly, Secure, SameSite=Strict cookie — never readable by JavaScript |
+| CSRF protection | Double-submit cookie pattern — server sets a readable `csrf_token` cookie on login; every state-changing request must echo it in the `X-CSRF-Token` header |
 | Tamper-evidence | keccak256 hash of each ciphertext anchored to Ethereum |
 
 ---
@@ -145,7 +146,7 @@ pip install -r requirements.txt
 
 # Set environment variables (or create a .env file)
 export DATABASE_URL="postgresql+asyncpg://user:pass@localhost:5432/securemsg"
-export REDIS_URL="redis://localhost:6379/0"
+export REDIS_URL="redis://:yourpassword@localhost:6379/0"
 export JWT_SECRET_KEY="your-secret"
 
 # Run migrations
@@ -237,20 +238,21 @@ After deployment, set `CONTRACT_ADDRESS` in `backend/.env`.
 
 ---
 
-## API Reference (stub)
+## API Reference
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| POST | `/api/auth/register` | No | Register account and identity key |
-| POST | `/api/auth/login` | No | Get JWT token |
-| GET | `/api/auth/me` | JWT | Current user profile |
-| POST | `/api/auth/prekeys` | JWT | Upload signed prekey + batch of one-time prekeys |
-| GET | `/api/auth/user/{u}/keybundle` | JWT | Fetch full X3DH key bundle for a user (IK + SPK + one OPK) |
-| POST | `/api/messages/send` | JWT | Send encrypted message |
-| GET | `/api/messages/inbox` | JWT | Retrieve received messages |
-| GET | `/api/messages/{id}` | JWT | Get a specific message |
-| GET | `/api/blockchain/status/{id}` | JWT | Check on-chain status |
-| GET | `/api/blockchain/verify/{id}` | JWT | Tamper-evidence check |
+| POST | `/api/auth/register` | No | Register account, upload X25519 identity key and Ed25519 signing key |
+| POST | `/api/auth/login` | No | Verify credentials; sets httpOnly `access_token` cookie and readable `csrf_token` cookie |
+| POST | `/api/auth/logout` | Cookie + CSRF | Clear session cookies |
+| GET | `/api/auth/me` | Cookie | Current user profile |
+| POST | `/api/auth/prekeys` | Cookie + CSRF | Upload signed prekey + batch of one-time prekeys |
+| GET | `/api/auth/user/{u}/keybundle` | Cookie | Fetch full X3DH key bundle for a user (IK + SPK + one OPK) |
+| POST | `/api/messages/send` | Cookie + CSRF | Send encrypted message |
+| GET | `/api/messages/inbox` | Cookie | Retrieve received messages |
+| GET | `/api/messages/{id}` | Cookie | Get a specific message |
+| GET | `/api/blockchain/status/{id}` | Cookie | Check on-chain status |
+| GET | `/api/blockchain/verify/{id}` | Cookie | Tamper-evidence check |
 
 Full interactive docs: `http://localhost:8000/docs` (Swagger UI)
 
@@ -380,10 +382,11 @@ Create `backend/.env`:
 
 ```env
 DATABASE_URL=postgresql+asyncpg://securemsg:securemsg@db:5432/securemsg
-REDIS_URL=redis://redis:6379/0
+REDIS_URL=redis://:yourpassword@redis:6379/0   # must match --requirepass in docker-compose.yml
 JWT_SECRET_KEY=change-me-to-a-random-256-bit-value
 JWT_ALGORITHM=HS256
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+APP_ENV=development   # set to 'development' to disable Secure cookie flag on http://localhost
 
 # Populated after deploying MessageDigest.sol
 ETH_RPC_URL=https://sepolia.infura.io/v3/YOUR_PROJECT_ID
