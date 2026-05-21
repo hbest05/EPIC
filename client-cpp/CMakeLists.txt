@@ -12,14 +12,6 @@ find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 qt_standard_project_setup()
 
 # ---------------------------------------------------------------------------
-# libsodium — cryptographic operations (X25519, Ed25519, XSalsa20-Poly1305)
-# Install via: apt install libsodium-dev  |  brew install libsodium
-#              vcpkg install libsodium     |  conan install libsodium
-# ---------------------------------------------------------------------------
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SODIUM REQUIRED libsodium)
-
-# ---------------------------------------------------------------------------
 # libcurl — HTTP client for REST API calls
 # ---------------------------------------------------------------------------
 find_package(CURL REQUIRED)
@@ -46,14 +38,12 @@ qt_add_executable(SecureMsg ${SOURCES} ${HEADERS})
 
 target_include_directories(SecureMsg PRIVATE
     src
-    ${SODIUM_INCLUDE_DIRS}
 )
 
 target_link_libraries(SecureMsg PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::Network
-    ${SODIUM_LIBRARIES}
     CURL::libcurl
 )
 
