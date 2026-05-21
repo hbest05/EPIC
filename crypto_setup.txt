@@ -12,7 +12,7 @@ X3DH (Extended Triple Diffie-Hellman) — Signal specification
 - Bob prepublishes a key bundle to the server (IK, SPK, OPKs — see below)
 - Alice fetches the bundle and runs 4 DH operations asynchronously (Bob can be offline)
 - SK = HKDF-SHA256(DH1 || DH2 || DH3 || DH4) seeds the Double Ratchet root key
-- Implemented via libsignal (Python: python-libsignal bindings; C++: libsignal-protocol-c)
+- Implemented via custom Signal Protocol state machine in the Python crypto daemon (see crypto-daemon/); C++ client sends/receives opaque ciphertext via IPC socket — no crypto in the C++ layer
 Per-message key evolution — Double Ratchet Algorithm:
 - Symmetric ratchet: (CK_next, MK) = HKDF(CK_current) — advances per message, erases MK after use → forward secrecy
 - DH ratchet: fresh X25519 keypair injected every round-trip, re-seeds root key → post-compromise security (heals after 1 round trip)
@@ -27,8 +27,9 @@ One-Time Prekeys (OPKs) — pool of ~100 X25519 keypairs, each used exactly once
 Password hashing server side:
 Argon2id — memory: 64 MiB, iterations: 3, parallelism: 4 (~500ms on target hardware)
 Local client private key protection at rest:
-HKDF-SHA256(user_passphrase, salt_local, info="cs4455-local-key-enc-v1") → AES-256-GCM(sk)
-- Separate KDF parameters from server-side Argon2id intentionally — different threat model (stolen device vs server breach)
+Argon2id(user_passphrase, salt_local, m=65536, t=3, p=4) → 32-byte wrap_key → AES-256-GCM(sk)
+- Argon2id used (not HKDF) because the input is a low-entropy user passphrase — HKDF is not a password KDF and must not be used here
+- Separate salt and parameters from server-side Argon2id intentionally — different threat model (stolen device vs server breach)
 Trust model between two parties:
 TOFU + SHA-256 fingerprint pinning over IK bytes
 - Server compromise can MitM first contact (before pinning) — this limitation is acknowledged explicitly
@@ -38,7 +39,8 @@ X3DH DH1 = DH(IK_A, SPK_B) — mutual authentication baked into the handshake
 Ed25519 signature on SPK by IK — Alice verifies the bundle came from Bob, not the server
 - Deniable: DH-based auth means Bob cannot prove to a third party that Alice sent a specific message (no transcript signatures)
 Internal hash:
-HKDF-SHA256 — used for SK derivation in X3DH, chain/message key derivation in Double Ratchet, and local key derivation
+HKDF-SHA256 — used for SK derivation in X3DH and chain/message key derivation in Double Ratchet
+(not used for local key derivation — see local key protection above)
 ---
  
 Additions from threat model:
