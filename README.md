@@ -9,22 +9,22 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Clients                              │
-│  ┌──────────────────┐        ┌──────────────────────────┐   │
-│  │  Web Client      │        │  Qt Desktop Client       │   │
-│  │  (JS + WebCrypto)│        │  (C++ + libsodium)       │   │
-│  └────────┬─────────┘        └────────────┬─────────────┘   │
-│           │  HTTPS + JWT                  │                  │
-└───────────┼───────────────────────────────┼─────────────────┘
-            │                               │
-            ▼                               ▼
-┌───────────────────────────────────────────────────────────┐
-│                   FastAPI Backend                         │
-│   /api/auth  │  /api/messages  │  /api/blockchain         │
-│                  PostgreSQL (SQLAlchemy + asyncpg)         │
-│                  Redis Stream (blockchain write queue)     │
-└──────────────────────────────┬────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        Clients                                               │
+│  ┌──────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐ │
+│  │  Web Client      │   │  Qt Desktop Client   │   │  Python Crypto       │ │
+│  │  (JS + WebCrypto)│   │  (C++ + libcurl)     │◄─►│  Daemon (local IPC)  │ │
+│  └────────┬─────────┘   └──────────┬───────────┘   └──────────────────────┘ │
+│           │  HTTPS + JWT           │ HTTPS/WSS (port 443)     Unix socket   │
+└───────────┼────────────────────────┼────────────────────────────────────────┘
+            │                        │
+            ▼                        ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                   FastAPI Backend                                            │
+│   /api/auth  │  /api/messages  │  /api/blockchain                           │
+│                  PostgreSQL (SQLAlchemy + asyncpg)                           │
+│                  Redis Stream (blockchain write queue)                       │
+└──────────────────────────────┬───────────────────────────────────────────────┘
                                │  Async worker
                                ▼
                    ┌───────────────────────┐
@@ -38,7 +38,7 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 
 | Property | Mechanism |
 |---|---|
-| End-to-end encryption | Signal Protocol — X3DH key agreement + Double Ratchet (AES-256-GCM per-message keys) |
+| End-to-end encryption | Signal Protocol implemented in Python crypto daemon; C++ client sends/receives opaque ciphertext via IPC socket |
 | Message authenticity | X3DH: DH1 = DH(IK_A, SPK_B) — mutual auth baked into handshake; Ed25519 signature on SPK proves bundle came from Bob |
 | Forward secrecy | Double Ratchet symmetric ratchet — fresh AES-256-GCM key per message, erased after use |
 | Post-compromise security | Double Ratchet DH ratchet — new X25519 keypair injected every round-trip, heals ratchet state after one undisturbed reply |
@@ -86,13 +86,17 @@ EPIC/
 │   └── styles.css             Placeholder dark-theme stylesheet
 │
 ├── client-cpp/                Qt6 desktop client
-│   ├── CMakeLists.txt         Build system (Qt6 + libsodium + libcurl)
+│   ├── CMakeLists.txt         Build system (Qt6 + libcurl)
 │   └── src/
 │       ├── main.cpp           Entry point — init libsodium, launch window
 │       ├── Client.hpp/.cpp    Main window + HTTP controller (libcurl)
 │       ├── User.hpp/.cpp      User identity + keypair (sodium_malloc)
 │       ├── Message.hpp/.cpp   Encrypted message data holder
-│       └── MessageStore.hpp/.cpp  Crypto operations + message cache
+│       └── MessageStore.hpp/.cpp  Message cache only, no crypto
+│
+├── crypto-daemon/             Python service handling X3DH, Double Ratchet,
+│                              key storage; runs locally alongside the C++ client
+│                              and exposes a Unix domain socket
 │
 ├── blockchain/                Hardhat project (Solidity / Ethereum)
 │   ├── package.json
@@ -116,8 +120,9 @@ EPIC/
 |---|---|
 | Backend | Python 3.12+, Docker Engine + Compose v2 (v2.27.0+) — spins up FastAPI, PostgreSQL 16, Redis 7 |
 | Frontend | Any modern browser (Chrome 133+ / Firefox 130+ for X25519) |
-| C++ client | Qt 6.6+, CMake 3.20+, libsodium, libcurl |
+| C++ client | Qt 6.6+, CMake 3.20+, libcurl |
 | Blockchain | Node.js 20+, npm |
+| Crypto Daemon | Python 3.12+, cryptography package |
 
 ---
 
