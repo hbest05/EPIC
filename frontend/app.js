@@ -27,7 +27,7 @@ const POLL_INTERVAL_MS = 5000; // TODO: replace with WebSocket
 let currentUser = null;        // { id, username }
 let myPrivateKey = null;       // X25519 CryptoKey (loaded from IndexedDB)
 let mySigningKey = null;       // Ed25519 CryptoKey (loaded from IndexedDB)
-const contacts = new Map();    // username → { x25519PublicKey, ed25519PublicKey }
+const contacts = new Map();    // username → full KeyBundleResponse (session cache only)
 let activeRecipient = null;
 let inboxPoller = null;
 
@@ -122,6 +122,103 @@ async function logout() {
     stopInboxPoller();
     showAuth();
   }
+}
+
+// ---------------------------------------------------------------------------
+// TOFU key pinning — persistent IndexedDB store
+// ---------------------------------------------------------------------------
+
+const TOFU_DB_NAME    = "tofu-store";
+const TOFU_STORE_NAME = "pins";
+
+function openTofuDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(TOFU_DB_NAME, 1);
+    req.onupgradeneeded = (e) => {
+      // Schema: { username (keyPath), ikFingerprint, pinnedAt }
+      e.target.result.createObjectStore(TOFU_STORE_NAME, { keyPath: "username" });
+    };
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror  = (e) => reject(e.target.error);
+  });
+}
+
+async function getPin(username) {
+  const db = await openTofuDb();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction(TOFU_STORE_NAME).objectStore(TOFU_STORE_NAME).get(username);
+    req.onsuccess = () => resolve(req.result ?? null);
+    req.onerror  = () => reject(req.error);
+  });
+}
+
+async function storePin(username, ikFingerprint) {
+  const db = await openTofuDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TOFU_STORE_NAME, "readwrite");
+    tx.objectStore(TOFU_STORE_NAME).put({
+      username,
+      ikFingerprint,
+      pinnedAt: new Date().toISOString(),
+    });
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+
+async function computeFingerprint(rawB64) {
+  // SHA-256 of raw key bytes — matches hashlib.sha256(key_bytes).hexdigest() server-side
+  const raw  = Uint8Array.from(atob(rawB64), c => c.charCodeAt(0));
+  const hash = await crypto.subtle.digest("SHA-256", raw);
+  return Array.from(new Uint8Array(hash))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function showKeyChangeWarning(username) {
+  // Prominent, non-dismissable-by-accident banner — never silently accept a key change
+  const banner = document.createElement("div");
+  banner.style.cssText = [
+    "position:fixed", "top:0", "left:0", "right:0",
+    "background:#c0392b", "color:#fff", "padding:16px 24px",
+    "font-size:15px", "font-weight:bold", "z-index:9999", "text-align:center",
+  ].join(";");
+  banner.textContent = `⚠ Security warning: key changed for ${username}. Possible MITM attack. Contact blocked.`;
+  const dismiss = document.createElement("button");
+  dismiss.textContent = "Dismiss";
+  dismiss.style.cssText = "margin-left:20px;padding:4px 14px;font-size:14px;cursor:pointer;";
+  dismiss.onclick = () => banner.remove();
+  banner.appendChild(dismiss);
+  document.body.prepend(banner);
+}
+
+/**
+ * Fetch a contact's full X3DH key bundle and enforce TOFU pinning.
+ *
+ * First contact: fingerprint is computed from ik_x25519 and pinned in IndexedDB.
+ * Subsequent contacts: fingerprint is compared — mismatch blocks the contact
+ * and shows a visible security warning. Never silently accepts a key change.
+ *
+ * @param {string} username
+ * @returns {object} KeyBundleResponse from the server
+ * @throws if TOFU check fails or the server returns an error
+ */
+async function fetchContactKeybundle(username) {
+  const bundle      = await apiFetch(`/auth/user/${username}/keybundle`);
+  const fingerprint = await computeFingerprint(bundle.ik_x25519);
+
+  const pin = await getPin(username);
+  if (pin === null) {
+    // First contact — trust on first use and pin the identity key
+    await storePin(username, fingerprint);
+  } else if (pin.ikFingerprint !== fingerprint) {
+    // Key changed — block this contact and surface a visible warning
+    showKeyChangeWarning(username);
+    throw new Error(`TOFU violation: key changed for ${username}`);
+  }
+  // Pin matches or was just set — cache bundle for this session
+  contacts.set(username, bundle);
+  return bundle;
 }
 
 // ---------------------------------------------------------------------------

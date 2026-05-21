@@ -35,3 +35,50 @@ class UserPublicProfile(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ---------------------------------------------------------------------------
+# Prekey upload
+# ---------------------------------------------------------------------------
+
+class SignedPrekeyUpload(BaseModel):
+    key_id: int
+    public_key: str = Field(..., description="Base64-encoded X25519 SPK public key")
+    signature: str  = Field(..., description="Base64-encoded Ed25519 signature over public_key, made with the user's IK")
+
+
+class OneTimePrekeyUpload(BaseModel):
+    key_id: int
+    public_key: str = Field(..., description="Base64-encoded X25519 OPK public key")
+
+
+class UploadPrekeysRequest(BaseModel):
+    signed_prekey: SignedPrekeyUpload
+    one_time_prekeys: list[OneTimePrekeyUpload] = Field(..., min_length=1, max_length=100)
+
+
+# ---------------------------------------------------------------------------
+# Key bundle response
+# ---------------------------------------------------------------------------
+
+class SPKBundle(BaseModel):
+    key_id: int
+    public_key: str  # base64 X25519
+    signature: str   # base64 Ed25519 signature by IK
+
+
+class OPKBundle(BaseModel):
+    key_id: int
+    public_key: str  # base64 X25519
+
+
+class KeyBundleResponse(BaseModel):
+    username: str
+    # Long-term identity keys
+    ik_x25519: str       # base64 raw X25519 — used in X3DH DH operations
+    ik_ed25519: str      # base64 raw Ed25519 — verifies SPK signature
+    ik_fingerprint: str  # SHA-256 hex of raw X25519 IK bytes — use for TOFU pinning
+    # Signed prekey
+    spk: SPKBundle
+    # One-time prekey — absent if pool exhausted; client must fall back to 3DH
+    opk: OPKBundle | None = None
