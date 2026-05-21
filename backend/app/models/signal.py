@@ -12,6 +12,7 @@ import uuid
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from app.database import Base
@@ -42,6 +43,8 @@ class SignedPrekey(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=True)
 
+    user = relationship("User", back_populates="signed_prekeys")
+
     __table_args__ = (
         Index("ix_signed_prekeys_user_id_key_id", "user_id", "key_id"),
     )
@@ -70,6 +73,8 @@ class OneTimePrekey(Base):
     public_key = Column(String(512), nullable=False)   # base64 X25519 public key
     used = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="one_time_prekeys")
 
     __table_args__ = (
         # Fetch path: WHERE user_id = ? AND used = false LIMIT 1

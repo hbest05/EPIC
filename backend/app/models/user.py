@@ -14,6 +14,7 @@ from sqlalchemy import Column, DateTime, String, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
+
 from app.database import Base
 
 
@@ -27,6 +28,9 @@ class User(Base):
     # Argon2id hash — see services/auth_service.py
     password_hash = Column(String(255), nullable=False)
 
+    identity_key = Column(String(512), nullable=True)        # base64 X25519 public key
+    ed25519_public_key = Column(String(512), nullable=True)  # base64 Ed25519 signing key
+
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     last_seen_at = Column(DateTime, nullable=True)
@@ -35,3 +39,5 @@ class User(Base):
     sent_messages = relationship("Message", foreign_keys="Message.sender_id", back_populates="sender")
     received_messages = relationship("Message", foreign_keys="Message.recipient_id", back_populates="recipient")
     access_records = relationship("MessageAccess", foreign_keys="MessageAccess.user_id", back_populates="user")
+    signed_prekeys = relationship("SignedPrekey", back_populates="user", cascade="all, delete-orphan")
+    one_time_prekeys = relationship("OneTimePrekey", back_populates="user", cascade="all, delete-orphan")
