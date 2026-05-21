@@ -88,7 +88,7 @@ EPIC/
 ├── client-cpp/                Qt6 desktop client
 │   ├── CMakeLists.txt         Build system (Qt6 + libcurl)
 │   └── src/
-│       ├── main.cpp           Entry point — init libsodium, launch window
+│       ├── main.cpp           Entry point — launch window
 │       ├── Client.hpp/.cpp    Main window + HTTP controller (libcurl)
 │       ├── User.hpp/.cpp      User identity + keypair (sodium_malloc)
 │       ├── Message.hpp/.cpp   Encrypted message data holder
@@ -210,7 +210,6 @@ cmake --build . --parallel
 
 **Dependencies (install first):**
 - **Qt6**: Download from qt.io or `winget install Qt.Qt.6.6.3` on Windows
-- **libsodium**: `brew install libsodium` / `apt install libsodium-dev` / `vcpkg install libsodium`
 - **libcurl**: `brew install curl` / `apt install libcurl4-openssl-dev` / `vcpkg install curl`
 
 ---
