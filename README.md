@@ -169,18 +169,15 @@ uvicorn main:app --reload
 
 ### Database migrations
 
-Two migration steps are required:
+All migrations are already in `backend/alembic/versions/`. Apply them all with:
 
 ```bash
-# 1. Apply the initial schema (users, messages, user_keys, message_access)
-alembic upgrade head
-
-# 2. Generate and apply the Signal Protocol migration
-#    (signed_prekeys, one_time_prekeys, ratchet_sessions, skipped_message_keys,
-#     plus new columns on messages)
-alembic revision --autogenerate -m "signal protocol tables"
 alembic upgrade head
 ```
+
+This runs both migrations in order:
+- `e32ea88cfd28` — initial schema (users, messages, user_keys, message_access)
+- `a1b2c3d4e5f6` — Signal Protocol tables + blockchain registry columns + user_keys constraint fix
 
 ---
 
@@ -362,9 +359,9 @@ Sender (client)                          Server              Blockchain
     │   { ciphertext, nonce,               │                     │
     │     ratchet_public_key, PN, N }      │                     │
     │                                store in DB                 │
-    │                                keccak256(ciphertext)       │
-    │                                push to Redis queue ───────►│
-    │◄── { message_id } ─────────────────│   worker: storeHash()│
+    │                                asyncio BackgroundTask      │
+    │                                web3.py: recordDigest() ───►│
+    │◄── { message_id } ─────────────────│   (15 s, async)      │
 ```
 
 ### Message receive flow
@@ -388,20 +385,18 @@ Recipient (client)                       Server
 
 ## Environment Variables
 
-Create `backend/.env`:
+Copy `.env.example` to `.env` in the repo root and fill in your values.
+Docker Compose reads these and injects them into the backend container.
 
 ```env
-DATABASE_URL=postgresql+asyncpg://securemsg:securemsg@db:5432/securemsg
-REDIS_URL=redis://:yourpassword@redis:6379/0   # must match --requirepass in docker-compose.yml
+# Required
 JWT_SECRET_KEY=change-me-to-a-random-256-bit-value
-JWT_ALGORITHM=HS256
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
-APP_ENV=development   # set to 'development' to disable Secure cookie flag on http://localhost
+REDIS_PASSWORD=change-me
 
-# Populated after deploying MessageDigest.sol
-ETH_RPC_URL=https://sepolia.infura.io/v3/YOUR_PROJECT_ID
-CONTRACT_ADDRESS=0x...
-ETH_PRIVATE_KEY=0x...
+# Blockchain (optional — omit to run without on-chain recording)
+PRIVATE_KEY=0x...                                      # server wallet private key
+RPC_URL=https://rpc2.sepolia.org                       # Sepolia JSON-RPC endpoint
+CONTRACT_ADDRESS=0x...                                 # deployed MessageDigestRegistry address
 ```
 
 Create `blockchain/.env`:
@@ -416,14 +411,19 @@ ETHERSCAN_API_KEY=...
 
 ## Blockchain — MessageDigestRegistry
 
-`MessageDigestRegistry.sol` is a second, purpose-built contract that provides
+`MessageDigestRegistry.sol` is a purpose-built contract that provides
 a **per-conversation audit registry** — every call to `recordDigest()` appends
 a `DigestRecord` (keccak256 hash + timestamp + recorder address + conversationId)
-to a public array and emits a `DigestRecorded` event.  
-The standalone JS integration layer (`blockchain/digestRecorder.js`) lets any
-Node.js process hash and anchor conversation segments without going through Hardhat.
+to a public array and emits a `DigestRecorded` event.
 
-### Setup
+Blockchain writes are handled natively by `backend/app/services/blockchain_service.py`
+using **web3.py** — no separate Node.js process is involved. After each message is
+saved, a FastAPI `BackgroundTask` calls `record_conversation_digest()` which
+signs and broadcasts the transaction using `AsyncWeb3(AsyncHTTPProvider(...))`.
+Verification (`GET /api/verify/{conversation_id}`) performs a gas-free `eth_call`
+via the same service.
+
+### Setup (compile & deploy — one-time)
 
 ```bash
 cd blockchain
@@ -460,32 +460,10 @@ node scripts/deployRegistry.js
 #     Deployed address written to: blockchain/deployedAddress.json
 ```
 
-The deployed address is written to `blockchain/deployedAddress.json`
-(git-ignored) and loaded automatically by `digestRecorder.js`.
-
-### Test a recording
-
-```js
-// run from repo root: node testRecord.js
-require("dotenv").config({ path: ".env" });
-const { recordConversationDigest, verifyDigest, getOnChainRecord } =
-    require("./blockchain/digestRecorder");
-
-(async () => {
-    const { txHash, blockNumber, recordIndex } = await recordConversationDigest(
-        "conv-uuid-001",
-        "Alice: hello\nBob: hi"
-    );
-    console.log("Recorded at index", recordIndex, "in block", blockNumber);
-    console.log("Etherscan:", `https://sepolia.etherscan.io/tx/${txHash}`);
-
-    const match = await verifyDigest("conv-uuid-001", "Alice: hello\nBob: hi", recordIndex);
-    console.log("Digest verified:", match); // true
-
-    const record = await getOnChainRecord(recordIndex);
-    console.log("On-chain record:", record);
-})();
-```
+After deployment, set `CONTRACT_ADDRESS` (along with `PRIVATE_KEY` and `RPC_URL`)
+in the host environment or `.env` file — docker-compose injects them into the
+backend container at startup. Do **not** add them to `backend/.env` directly;
+use the repo-root `.env.example` as your template.
 
 ### Etherscan link format
 
@@ -499,8 +477,8 @@ https://sepolia.etherscan.io/tx/{txHash}
 |---|---|
 | `blockchain/contracts/MessageDigestRegistry.sol` | Production Solidity contract |
 | `blockchain/scripts/deployRegistry.js` | Standalone deploy script |
-| `blockchain/digestRecorder.js` | JS integration module |
 | `blockchain/MessageDigestRegistryABI.json` | **Must be included in submission zip** |
+| `backend/app/services/blockchain_service.py` | Native web3.py integration (no Node.js) |
 | `blockchain/deployedAddress.json` | Written post-deploy; git-ignored |
 | `.env.example` | Environment variable template |
 

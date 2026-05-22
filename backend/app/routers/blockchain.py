@@ -140,7 +140,8 @@ async def _do_verify(
 @router.get("/verify/{conversation_id}", response_model=BlockchainVerifyResponse)
 async def verify_blockchain(
     conversation_id: str,
-    text: Optional[str] = Query(default=None, description="Conversation text to verify. "
+    text: Optional[str] = Query(default=None, max_length=65536,
+                                description="Conversation text to verify. "
                                 "If omitted, the stored ciphertext is used."),
     current_user: User = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),
@@ -155,7 +156,8 @@ async def verify_blockchain(
 @verify_router.get("/{conversation_id}", response_model=BlockchainVerifyResponse)
 async def verify_blockchain_alias(
     conversation_id: str,
-    text: Optional[str] = Query(default=None, description="Conversation text to verify. "
+    text: Optional[str] = Query(default=None, max_length=65536,
+                                description="Conversation text to verify. "
                                 "If omitted, the stored ciphertext is used."),
     current_user: User = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),

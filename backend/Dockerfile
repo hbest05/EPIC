@@ -28,6 +28,11 @@ COPY backend/ .
 # blockchain_service.py checks /abi/MessageDigestRegistryABI.json first.
 COPY blockchain/MessageDigestRegistryABI.json /abi/MessageDigestRegistryABI.json
 
+# Run as a non-root user — if an RCE occurs the attacker does not get UID 0.
+RUN useradd -u 1001 -m appuser \
+    && chown -R appuser /app /abi
+USER 1001
+
 # Run Alembic migrations then start Uvicorn.
 # TODO: In production use gunicorn with uvicorn workers for multiple processes.
 # Set APP_ENV=development to enable hot-reload (docker-compose does this automatically).

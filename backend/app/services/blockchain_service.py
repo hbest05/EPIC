@@ -202,7 +202,7 @@ async def record_conversation_digest(
 
     # 5. Sign (synchronous — no network call) and broadcast
     signed  = account.sign_transaction(tx)
-    tx_hash = await w3.eth.send_raw_transaction(signed.rawTransaction)
+    tx_hash = await w3.eth.send_raw_transaction(signed.raw_transaction)
 
     # 6. Wait for 1 block confirmation (timeout matches ~2 Sepolia block times)
     receipt = await w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)

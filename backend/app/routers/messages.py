@@ -1,26 +1,27 @@
 """
 Messages router — send, inbox, and fetch endpoints.
 
-After each message is persisted, a fire-and-forget background task records a
-keccak256 digest of the ciphertext on Ethereum Sepolia via digestRecorder.js.
-The HTTP response is returned immediately; the blockchain write happens
-asynchronously and updates the message row once confirmed.
+After each message is persisted, a BackgroundTask records a keccak256 digest
+of the ciphertext on Ethereum Sepolia via web3.py.  The HTTP response is
+returned immediately; the background task runs after the DB session commits,
+then updates the message row once the Ethereum transaction is confirmed.
 """
 
 import base64
 import logging
 from typing import Optional
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.models.message import Message
 from app.models.user import User
 from app.schemas.message import MessageResponse, SendMessageRequest, SendMessageResponse
 from app.services.auth_service import get_current_user
-from app.services.blockchain_service import fire_and_forget
+from app.services.blockchain_service import is_configured, record_conversation_digest
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +64,56 @@ def _to_response(msg: Message, sender_username: str) -> MessageResponse:
 
 
 # ---------------------------------------------------------------------------
+# Blockchain background task
+# ---------------------------------------------------------------------------
+
+async def _record_blockchain(
+    message_id: str,
+    conversation_id: str,
+    conversation_text: str,
+) -> None:
+    """
+    Record a keccak256 digest on-chain then update the message row.
+
+    Scheduled via FastAPI BackgroundTasks so it runs after the HTTP response
+    is sent — which is after get_db() has committed the INSERT.  Opens its
+    own session so it is independent of the request session lifecycle.
+    Never raises: errors are logged and the app continues normally.
+    """
+    if not is_configured():
+        return
+    try:
+        result = await record_conversation_digest(conversation_id, conversation_text)
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(Message)
+                .where(Message.id == message_id)
+                .values(
+                    blockchain_tx_hash=result.get("tx_hash"),
+                    blockchain_block_number=result.get("block_number"),
+                    blockchain_record_index=result.get("record_index"),
+                )
+            )
+            await session.commit()
+        logger.info(
+            "blockchain record confirmed | msg=%s tx=%s block=%s idx=%s",
+            message_id,
+            result.get("tx_hash"),
+            result.get("block_number"),
+            result.get("record_index"),
+        )
+    except Exception as exc:
+        logger.error("blockchain record failed for message %s: %s", message_id, exc)
+
+
+# ---------------------------------------------------------------------------
 # POST /send
 # ---------------------------------------------------------------------------
 
 @router.post("/send", response_model=SendMessageResponse, status_code=status.HTTP_201_CREATED)
 async def send_message(
     body: SendMessageRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession  = Depends(get_db),
 ):
@@ -100,18 +145,14 @@ async def send_message(
     db.add(msg)
     await db.flush()  # populate msg.id before the task captures it
 
-    # Fire-and-forget blockchain recording — does NOT block this response.
-    # The background task updates blockchain_tx_hash / blockchain_block_number /
-    # blockchain_record_index once the Ethereum transaction is confirmed.
-    # If blockchain is unconfigured or Sepolia is unreachable the task logs the
-    # error and exits silently; the message is already safely in PostgreSQL.
     conv_id = _conversation_id(current_user.id, recipient.id)
-    fire_and_forget(
-        message_id=str(msg.id),
-        conversation_id=conv_id,
-        # Hash the base64 string — reproducible by the verify endpoint using
-        # the same base64-encoded ciphertext from the DB.
-        conversation_text=body.ciphertext,
+    # Schedule after response — BackgroundTasks run after get_db() commits,
+    # so the INSERT is visible when _record_blockchain opens its own session.
+    background_tasks.add_task(
+        _record_blockchain,
+        str(msg.id),
+        conv_id,
+        body.ciphertext,  # hash the base64 string; verify endpoint re-encodes the same way
     )
 
     return SendMessageResponse(id=str(msg.id))
@@ -142,7 +183,7 @@ async def get_inbox(
 
 @router.get("/{message_id}", response_model=MessageResponse)
 async def get_message(
-    message_id: str,
+    message_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession  = Depends(get_db),
 ):
