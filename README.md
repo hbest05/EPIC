@@ -414,6 +414,102 @@ ETHERSCAN_API_KEY=...
 
 ---
 
+## Blockchain — MessageDigestRegistry
+
+`MessageDigestRegistry.sol` is a second, purpose-built contract that provides
+a **per-conversation audit registry** — every call to `recordDigest()` appends
+a `DigestRecord` (keccak256 hash + timestamp + recorder address + conversationId)
+to a public array and emits a `DigestRecorded` event.  
+The standalone JS integration layer (`blockchain/digestRecorder.js`) lets any
+Node.js process hash and anchor conversation segments without going through Hardhat.
+
+### Setup
+
+```bash
+cd blockchain
+npm install          # installs hardhat, OZ contracts, ethers, dotenv
+
+# Copy env template and fill in your Sepolia wallet key + RPC endpoint
+cp ../.env.example .env
+# Edit .env — set PRIVATE_KEY and RPC_URL
+```
+
+### Compile
+
+```bash
+cd blockchain
+npx hardhat compile
+# Artifacts written to blockchain/artifacts/
+```
+
+### Deploy to Sepolia
+
+```bash
+# From the blockchain/ directory (after compile):
+node scripts/deployRegistry.js
+
+# Output example:
+#   Deployer address : 0xYourWallet
+#   Deployer balance : 0.05 ETH
+#   Deployment tx hash : 0xabc...
+#   Waiting for 1 confirmation...
+#   ✓ MessageDigestRegistry deployed
+#     Contract address : 0x1234...
+#     Block number     : 7654321
+#     Etherscan        : https://sepolia.etherscan.io/tx/0xabc...
+#     Deployed address written to: blockchain/deployedAddress.json
+```
+
+The deployed address is written to `blockchain/deployedAddress.json`
+(git-ignored) and loaded automatically by `digestRecorder.js`.
+
+### Test a recording
+
+```js
+// run from repo root: node testRecord.js
+require("dotenv").config({ path: ".env" });
+const { recordConversationDigest, verifyDigest, getOnChainRecord } =
+    require("./blockchain/digestRecorder");
+
+(async () => {
+    const { txHash, blockNumber, recordIndex } = await recordConversationDigest(
+        "conv-uuid-001",
+        "Alice: hello\nBob: hi"
+    );
+    console.log("Recorded at index", recordIndex, "in block", blockNumber);
+    console.log("Etherscan:", `https://sepolia.etherscan.io/tx/${txHash}`);
+
+    const match = await verifyDigest("conv-uuid-001", "Alice: hello\nBob: hi", recordIndex);
+    console.log("Digest verified:", match); // true
+
+    const record = await getOnChainRecord(recordIndex);
+    console.log("On-chain record:", record);
+})();
+```
+
+### Etherscan link format
+
+```
+https://sepolia.etherscan.io/tx/{txHash}
+```
+
+### Submission checklist
+
+| File | Purpose |
+|---|---|
+| `blockchain/contracts/MessageDigestRegistry.sol` | Production Solidity contract |
+| `blockchain/scripts/deployRegistry.js` | Standalone deploy script |
+| `blockchain/digestRecorder.js` | JS integration module |
+| `blockchain/MessageDigestRegistryABI.json` | **Must be included in submission zip** |
+| `blockchain/deployedAddress.json` | Written post-deploy; git-ignored |
+| `.env.example` | Environment variable template |
+
+> `blockchain/MessageDigestRegistryABI.json` is a plain JSON array of all
+> function and event signatures. Include it in the submission zip alongside
+> the compiled artifacts.
+
+---
+
 ## Team
 
 EPIC — Alpha and the Cryptmunks

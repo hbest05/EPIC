@@ -76,22 +76,40 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
-    # Blockchain (optional)
+    # Blockchain (optional — web3.py / MessageDigestRegistry)
     # ------------------------------------------------------------------
-    # These are only required when the blockchain write-queue worker is
-    # running.  Leave them empty during development if you haven't deployed
-    # the smart contract yet — the app will still start.
-    eth_rpc_url: str = Field(
+    # Leave all three empty during development if you haven't deployed the
+    # contract yet.  The app starts and runs normally without them; on-chain
+    # recording calls are skipped with a logged warning.
+    #
+    # Canonical env var names (set these in .env or docker-compose):
+    #   PRIVATE_KEY       — server wallet private key (0x-prefixed 64 hex chars)
+    #   RPC_URL           — Sepolia JSON-RPC endpoint
+    #   CONTRACT_ADDRESS  — deployed MessageDigestRegistry address
+    #
+    # The eth_* aliases are kept for backward compatibility with existing .env
+    # files that used the original variable names.
+    private_key: str = Field(
         default="",
-        description="Ethereum JSON-RPC endpoint (e.g. Alchemy/Infura Sepolia URL)",
+        description="Server wallet private key — SENSITIVE, never logged (PRIVATE_KEY env var)",
+    )
+    rpc_url: str = Field(
+        default="",
+        description="Sepolia JSON-RPC endpoint (RPC_URL env var)",
     )
     contract_address: str = Field(
         default="",
-        description="Deployed MessageDigest.sol contract address on Sepolia",
+        description="Deployed MessageDigestRegistry contract address on Sepolia",
+    )
+
+    # Backward-compatible aliases for pre-existing .env files
+    eth_rpc_url: str = Field(
+        default="",
+        description="Alias for RPC_URL — prefer RPC_URL in new deployments",
     )
     eth_private_key: str = Field(
         default="",
-        description="Private key for the on-chain submitter account — use a secrets manager in prod",
+        description="Alias for PRIVATE_KEY — prefer PRIVATE_KEY in new deployments",
     )
 
     model_config = SettingsConfigDict(
