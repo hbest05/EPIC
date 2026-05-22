@@ -2,9 +2,9 @@
 Blockchain router — tamper-evidence verification endpoint.
 
 GET /api/verify/{conversation_id}
-  Fetches the most recently confirmed message in a conversation, calls
-  verifyDigestCli.js (which performs an eth_call against MessageDigestRegistry),
-  and returns a comparison of the local and on-chain digests.
+  Fetches the most recently confirmed message in a conversation, performs an
+  eth_call against MessageDigestRegistry via web3.py, and returns a comparison
+  of the local and on-chain digests.
 
 The conversation_id path parameter must be in the canonical format produced
 by the messages router: "{min_uuid}_{max_uuid}" (lexicographically sorted
@@ -13,6 +13,7 @@ string representations of the two participants' user UUIDs).
 
 import base64
 import logging
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -59,17 +60,24 @@ async def _do_verify(
         )
     uuid_a, uuid_b = parts[0], parts[1]
 
+    try:
+        uid_a = uuid.UUID(uuid_a)
+        uid_b = uuid.UUID(uuid_b)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="conversation_id must be in the format {uuid1}_{uuid2}",
+        )
+
     # Fetch the most recently confirmed message in this conversation
     result = await db.execute(
         select(Message)
         .where(
             Message.blockchain_record_index.isnot(None),
             (
-                (Message.sender_id.cast(type_=None) == uuid_a) &
-                (Message.recipient_id.cast(type_=None) == uuid_b)
+                (Message.sender_id == uid_a) & (Message.recipient_id == uid_b)
             ) | (
-                (Message.sender_id.cast(type_=None) == uuid_b) &
-                (Message.recipient_id.cast(type_=None) == uuid_a)
+                (Message.sender_id == uid_b) & (Message.recipient_id == uid_a)
             ),
         )
         .order_by(Message.created_at.desc())
@@ -95,7 +103,7 @@ async def _do_verify(
     else:
         conversation_text = base64.b64encode(msg.ciphertext).decode()
 
-    # Call verifyDigestCli.js — awaited (eth_call is fast, typically < 2 s)
+    # eth_call via web3.py — awaited (view call, typically < 2 s on Sepolia)
     try:
         result_data = await verify_on_chain(
             conversation_id=conversation_id,
