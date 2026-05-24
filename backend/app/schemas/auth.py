@@ -44,7 +44,7 @@ class UserPublicProfile(BaseModel):
 class SignedPrekeyUpload(BaseModel):
     key_id: int
     public_key: str = Field(..., description="Base64-encoded X25519 SPK public key")
-    signature: str  = Field(..., description="Base64-encoded Ed25519 signature over public_key, made with the user's IK")
+    signature: str = Field(..., description="Base64-encoded Ed25519 signature over public_key, made with the user's IK")
 
 
 class OneTimePrekeyUpload(BaseModel):

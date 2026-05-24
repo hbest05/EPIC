@@ -186,7 +186,7 @@ async def upload_prekeys(
     db.add(SignedPrekey(
         user_id=current_user.id,
         key_id=body.signed_prekey.key_id,
-        public_key=body.signed_prekey.public_key,  # stored as base64 string per model design
+        public_key=body.signed_prekey.public_key,
         signature=body.signed_prekey.signature,
         expires_at=datetime.now(timezone.utc) + timedelta(days=7),
     ))
@@ -196,7 +196,7 @@ async def upload_prekeys(
         db.add(OneTimePrekey(
             user_id=current_user.id,
             key_id=opk.key_id,
-            public_key=opk.public_key,  # stored as base64 string per model design
+            public_key=opk.public_key,
         ))
 
     # get_db commits all inserts on success; returns 204 No Content
