@@ -34,6 +34,7 @@ class Message(Base):
     blockchain_tx_hash = Column(String, nullable=True)
     blockchain_block_number = Column(Integer, nullable=True)
     blockchain_record_index = Column(Integer, nullable=True)
+    blockchain_batch_index = Column(Integer, nullable=True)
 
     # Double Ratchet header fields — populated by the sending ratchet service
     ratchet_public_key = Column(String(512), nullable=True)        # sender's DH ratchet key (base64)

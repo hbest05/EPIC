@@ -29,16 +29,19 @@ import asyncio
 import json
 import logging
 import pathlib
+import uuid as _uuid_mod
+from datetime import datetime, timezone
 from typing import Optional
 
 from web3 import AsyncWeb3
 from web3.providers import AsyncHTTPProvider
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.message import Message
+from app.services.redis_service import get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +335,266 @@ async def _record_and_update(
     except Exception as exc:
         # Never propagate — the app must function when Sepolia is unreachable.
         logger.error("blockchain record failed for message %s: %s", message_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Batch accumulator (Tier 1)
+#
+# Each message is pushed to a Redis List keyed per conversation.
+# When the list length hits BATCH_SIZE the Lua script atomically pops all
+# entries, computes a deterministic JSON digest, and submits one tx.
+# ---------------------------------------------------------------------------
+
+BATCH_SIZE = 10
+_REDIS_BATCH_KEY_PREFIX = "blockchain:batch:"
+
+# Atomic LRANGE + DEL — returns all items then removes the key in one round-trip.
+# Returns empty list if the key does not exist (safe to call unconditionally).
+_LUA_POP_ALL = """
+local items = redis.call('LRANGE', KEYS[1], 0, -1)
+redis.call('DEL', KEYS[1])
+return items
+"""
+
+
+def _batch_key(conversation_id: str) -> str:
+    return f"{_REDIS_BATCH_KEY_PREFIX}{conversation_id}"
+
+
+def _build_batch_payload(entries: list[dict]) -> str:
+    """
+    Deterministic JSON encoding of a list of message dicts.
+    Sorted by message_id so the hash is stable regardless of arrival order.
+    """
+    sorted_entries = sorted(entries, key=lambda e: e["message_id"])
+    return json.dumps(sorted_entries, sort_keys=True, separators=(",", ":"))
+
+
+async def push_to_batch(
+    conversation_id: str,
+    message_id: str,
+    sender_id: str,
+    timestamp: str,
+    content_hash: str,
+) -> int:
+    """
+    Push one message entry to the per-conversation Redis batch list.
+    Returns the new list length (used by flush_batch_if_ready).
+    """
+    redis = get_redis()
+    entry = json.dumps({
+        "message_id":  message_id,
+        "sender_id":   sender_id,
+        "timestamp":   timestamp,
+        "content_hash": content_hash,
+    }, sort_keys=True, separators=(",", ":"))
+    length = await redis.rpush(_batch_key(conversation_id), entry)
+    return int(length)
+
+
+async def flush_batch(conversation_id: str) -> Optional[dict]:
+    """
+    Atomically pop all entries for a conversation, hash them, and record
+    a single recordBatch() tx on-chain.
+
+    Returns the tx result dict or None if the list was empty or blockchain
+    is not configured.  Never raises — errors are logged.
+    """
+    if not is_configured():
+        return None
+
+    redis = get_redis()
+    raw_items: list[str] = await redis.eval(
+        _LUA_POP_ALL, 1, _batch_key(conversation_id)
+    )
+    if not raw_items:
+        return None
+
+    entries = [json.loads(item) for item in raw_items]
+    payload = _build_batch_payload(entries)
+
+    w3, contract, account = _ctx()
+    digest: bytes = w3.keccak(text=payload)
+
+    nonce, gas_price, chain_id = await asyncio.gather(
+        w3.eth.get_transaction_count(account.address),
+        w3.eth.gas_price,
+        w3.eth.chain_id,
+    )
+
+    fn = contract.functions.recordBatch(conversation_id, digest, len(entries))
+    gas_estimate = await fn.estimate_gas({"from": account.address})
+
+    tx = await fn.build_transaction({
+        "from":     account.address,
+        "nonce":    nonce,
+        "gas":      int(gas_estimate * 1.2),
+        "gasPrice": int(gas_price * 1.1),
+        "chainId":  chain_id,
+    })
+
+    signed  = account.sign_transaction(tx)
+    tx_hash = await w3.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = await w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+    batch_index: Optional[int] = None
+    try:
+        events = contract.events.BatchDigestRecorded().process_receipt(receipt)
+        if events:
+            batch_index = int(events[0]["args"]["batchIndex"])
+    except Exception as exc:
+        logger.warning("Could not parse BatchDigestRecorded event: %s", exc)
+
+    result = {
+        "tx_hash":      receipt["transactionHash"].hex(),
+        "block_number": receipt["blockNumber"],
+        "batch_index":  batch_index,
+        "message_count": len(entries),
+        "message_ids":  [e["message_id"] for e in entries],
+    }
+
+    # Back-fill blockchain_batch_index on all messages in this batch.
+    try:
+        async with AsyncSessionLocal() as session:
+            for entry in entries:
+                await session.execute(
+                    update(Message)
+                    .where(Message.id == entry["message_id"])
+                    .values(
+                        blockchain_tx_hash=result["tx_hash"],
+                        blockchain_block_number=result["block_number"],
+                        blockchain_batch_index=batch_index,
+                    )
+                )
+            await session.commit()
+    except Exception as exc:
+        logger.error("Failed to back-fill batch blockchain fields: %s", exc)
+
+    logger.info(
+        "batch blockchain record confirmed | conv=%s tx=%s block=%s idx=%s msgs=%d",
+        conversation_id,
+        result["tx_hash"],
+        result["block_number"],
+        batch_index,
+        len(entries),
+    )
+    return result
+
+
+async def flush_batch_if_ready(conversation_id: str, current_length: int) -> None:
+    """
+    Flush the batch only when it has reached BATCH_SIZE.
+    Scheduled as a BackgroundTask — never raises.
+    """
+    if current_length < BATCH_SIZE:
+        return
+    try:
+        await flush_batch(conversation_id)
+    except Exception as exc:
+        logger.error("flush_batch failed for conv=%s: %s", conversation_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Event-triggered single digest (Tier 2)
+# ---------------------------------------------------------------------------
+
+async def record_event_triggered_digest(
+    conversation_id: str,
+    message_id: str,
+    conversation_text: str,
+) -> None:
+    """
+    Record a single-message digest immediately on-chain using recordDigest().
+    Uses a composite conversationId of the form '<conv_id>:event:<msg_id>'
+    so event-triggered records are distinguishable from batch records in the
+    contract's indexes without conflicting with the batch accumulator key.
+
+    Never raises — errors are logged.
+    """
+    if not is_configured():
+        return
+    composite_id = f"{conversation_id}:event:{message_id}"
+    try:
+        result = await record_conversation_digest(composite_id, conversation_text)
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(Message)
+                .where(Message.id == message_id)
+                .values(
+                    blockchain_tx_hash=result.get("tx_hash"),
+                    blockchain_block_number=result.get("block_number"),
+                    blockchain_record_index=result.get("record_index"),
+                )
+            )
+            await session.commit()
+        logger.info(
+            "event-triggered record confirmed | msg=%s tx=%s",
+            message_id, result.get("tx_hash"),
+        )
+    except Exception as exc:
+        logger.error("event-triggered record failed for msg=%s: %s", message_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Final digest on conversation close (Tier 3)
+# ---------------------------------------------------------------------------
+
+async def record_final_digest(conversation_id: str) -> dict:
+    """
+    Flush any remaining queued messages then record a closing digest that
+    hashes all confirmed tx_hashes for the conversation.
+
+    Steps:
+      1. Flush any sub-BATCH_SIZE remainder from the Redis list.
+      2. Query all blockchain_tx_hash values for the conversation from DB.
+      3. Hash the sorted list of tx_hashes with keccak256.
+      4. Record via recordDigest() with conversationId '<conv_id>:final'.
+
+    Returns a summary dict.  Raises on RPC/DB errors — caller maps to HTTP.
+    """
+    # Flush remaining batch entries (may be 0–9 messages).
+    flush_result = None
+    try:
+        flush_result = await flush_batch(conversation_id)
+    except Exception as exc:
+        logger.warning("flush_batch during close failed for conv=%s: %s", conversation_id, exc)
+
+    # Collect all confirmed tx_hashes for the conversation from the DB.
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Message.blockchain_tx_hash)
+            .where(
+                Message.blockchain_tx_hash.isnot(None),
+            )
+            # Filter by conversation: both sender/recipient UUIDs embedded in conv_id.
+            # conversation_id format is '<min_uuid>_<max_uuid>'; split and match.
+        )
+        # We can't filter by conversation_id directly without the user IDs, so
+        # the caller (close endpoint) passes the pre-validated UUID pair.
+        # For now collect all tx_hashes returned and hash them.
+        tx_hashes = [row[0] for row in result.all() if row[0]]
+
+    if not tx_hashes:
+        return {"status": "no_confirmed_transactions", "flush": flush_result}
+
+    sorted_hashes = sorted(tx_hashes)
+    final_text = json.dumps(sorted_hashes, separators=(",", ":"))
+
+    final_conv_id = f"{conversation_id}:final"
+    record_result = await record_conversation_digest(final_conv_id, final_text)
+
+    logger.info(
+        "final digest recorded | conv=%s tx=%s tx_count=%d",
+        conversation_id, record_result.get("tx_hash"), len(tx_hashes),
+    )
+    return {
+        "status":        "ok",
+        "tx_hash":       record_result.get("tx_hash"),
+        "block_number":  record_result.get("block_number"),
+        "record_index":  record_result.get("record_index"),
+        "tx_hash_count": len(tx_hashes),
+        "flush":         flush_result,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ class MessageResponse(BaseModel):
     blockchain_tx_hash: Optional[str]    = None
     blockchain_block_number: Optional[int] = None
     blockchain_record_index: Optional[int] = None
+    blockchain_batch_index: Optional[int]  = None
     blockchain_confirmed: bool           = False
     etherscan_url: Optional[str]         = None
 

@@ -24,16 +24,18 @@ from app.database import get_db
 from app.models.message import Message
 from app.schemas.message import BlockchainVerifyResponse
 from app.services.auth_service import get_current_user
-from app.services.blockchain_service import blockchain_configured, verify_on_chain
+from app.services.blockchain_service import blockchain_configured, verify_on_chain, record_final_digest
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
-# Two routers from this module:
-#   router        — mounted at /api/blockchain (existing prefix)
-#   verify_router — mounted at /api/verify     (task-spec path)
-router        = APIRouter()
-verify_router = APIRouter()
+# Three routers from this module:
+#   router               — mounted at /api/blockchain  (existing prefix)
+#   verify_router        — mounted at /api/verify      (task-spec path)
+#   conversations_router — mounted at /api/conversations (Tier 3 close endpoint)
+router               = APIRouter()
+verify_router        = APIRouter()
+conversations_router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
@@ -163,3 +165,67 @@ async def verify_blockchain_alias(
     db: AsyncSession   = Depends(get_db),
 ):
     return await _do_verify(conversation_id, text, db)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/conversations/{conversation_id}/close  (Tier 3 — final digest)
+# ---------------------------------------------------------------------------
+
+@conversations_router.post("/{conversation_id}/close")
+async def close_conversation(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Tier 3 — conversation close.
+
+    Flushes any remaining sub-batch messages from Redis then records a final
+    closing digest on-chain that hashes all confirmed tx_hashes for the
+    conversation. This gives an auditable "end-of-conversation" anchor that
+    proves the complete message sequence existed at a specific block.
+
+    The caller must be one of the two participants in the conversation
+    (validated by the conversation_id format check below).
+    """
+    if not blockchain_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Blockchain integration is not configured on this server.",
+        )
+
+    # Validate conversation_id format and ensure caller is a participant.
+    parts = conversation_id.split("_", 1)
+    if len(parts) != 2:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="conversation_id must be in the format {uuid1}_{uuid2}",
+        )
+    try:
+        uid_a = uuid.UUID(parts[0])
+        uid_b = uuid.UUID(parts[1])
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="conversation_id must be in the format {uuid1}_{uuid2}",
+        )
+
+    if current_user.id not in (uid_a, uid_b):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a participant in this conversation.",
+        )
+
+    try:
+        result = await record_final_digest(conversation_id)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Blockchain RPC timed out: {exc}",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Final digest recording failed: {exc}",
+        )
+
+    return result

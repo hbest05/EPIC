@@ -52,9 +52,11 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth.router,             prefix="/api/auth",       tags=["auth"])
 app.include_router(messages.router,         prefix="/api/messages",   tags=["messages"])
-app.include_router(blockchain.router,       prefix="/api/blockchain", tags=["blockchain"])
+app.include_router(blockchain.router,               prefix="/api/blockchain",    tags=["blockchain"])
 # Also mount the verify endpoint at /api/verify/:conversationId (task spec)
-app.include_router(blockchain.verify_router, prefix="/api/verify",    tags=["verify"])
+app.include_router(blockchain.verify_router,        prefix="/api/verify",        tags=["verify"])
+# Tier 3: conversation close endpoint
+app.include_router(blockchain.conversations_router, prefix="/api/conversations", tags=["conversations"])
 
 
 @app.on_event("startup")

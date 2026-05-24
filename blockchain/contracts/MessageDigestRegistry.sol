@@ -43,6 +43,14 @@ contract MessageDigestRegistry is Ownable {
         string  conversationId; // off-chain ID used to group records by chat thread
     }
 
+    struct BatchRecord {
+        bytes32 digest;          // keccak256 of the sorted JSON batch payload
+        uint256 timestamp;       // block.timestamp at recording
+        address recorder;        // msg.sender — proof of submitting wallet
+        string  conversationId;  // off-chain thread ID
+        uint256 messageCount;    // number of messages included in this batch
+    }
+
     // -----------------------------------------------------------------------
     // Storage
     // -----------------------------------------------------------------------
@@ -53,6 +61,12 @@ contract MessageDigestRegistry is Ownable {
     /// @notice Maps each conversationId to its list of record indexes in `records[]`.
     ///         Allows O(1) append and O(n) lookup per thread without full array scans.
     mapping(string => uint256[]) public conversationIndexes;
+
+    /// @notice All batch records in insertion order. Index == batchIndex returned by recordBatch().
+    BatchRecord[] public batches;
+
+    /// @notice Maps each conversationId to its list of batch indexes in `batches[]`.
+    mapping(string => uint256[]) public conversationBatchIndexes;
 
     // -----------------------------------------------------------------------
     // Events
@@ -70,6 +84,22 @@ contract MessageDigestRegistry is Ownable {
         uint256 indexed recordIndex,
         string  indexed conversationId,
         bytes32         digest,
+        uint256         timestamp
+    );
+
+    /**
+     * @notice Emitted on every successful call to recordBatch().
+     * @param batchIndex     Index into `batches[]` — stable, never changes.
+     * @param conversationId Off-chain thread ID (indexed for log filtering).
+     * @param digest         keccak256 of the JSON-encoded batch payload.
+     * @param messageCount   Number of messages included in this batch.
+     * @param timestamp      Block timestamp at the time of recording.
+     */
+    event BatchDigestRecorded(
+        uint256 indexed batchIndex,
+        string  indexed conversationId,
+        bytes32         digest,
+        uint256         messageCount,
         uint256         timestamp
     );
 
@@ -91,9 +121,6 @@ contract MessageDigestRegistry is Ownable {
      * @dev    Append-only: records are never deleted or overwritten, which is
      *         the core tamper-evidence guarantee. Gas note: one SSTORE for the
      *         DigestRecord slot costs ~22 k gas; the mapping push adds ~5 k.
-     *         The Redis worker in redis_service.py batches calls to this
-     *         function (one per conversation segment rather than per message)
-     *         to amortise the per-tx base cost of ~21 k gas.
      * @param  conversationId Off-chain UUID / slug identifying the chat thread.
      * @param  digest         keccak256(conversationSegment) computed by the backend.
      * @return recordIndex    Index of the newly created record in `records[]`.
@@ -102,20 +129,48 @@ contract MessageDigestRegistry is Ownable {
         string calldata conversationId,
         bytes32         digest
     ) external onlyOwner returns (uint256 recordIndex) {
-        // Array length before push is the 0-based index of the new element.
         recordIndex = records.length;
 
         records.push(DigestRecord({
             digest:         digest,
             timestamp:      block.timestamp,
-            recorder:       msg.sender,       // captures server wallet for accountability
+            recorder:       msg.sender,
             conversationId: conversationId
         }));
 
-        // Track which indexes belong to this thread for fast per-conversation lookup.
         conversationIndexes[conversationId].push(recordIndex);
 
         emit DigestRecorded(recordIndex, conversationId, digest, block.timestamp);
+    }
+
+    /**
+     * @notice Record a keccak256 digest of a batch of messages on-chain.
+     * @dev    One transaction covers up to BATCH_SIZE messages, amortising the
+     *         ~21 k base gas cost. The digest is keccak256 of a deterministic
+     *         JSON encoding of the batch produced by the Python backend.
+     * @param  conversationId Off-chain UUID identifying the chat thread.
+     * @param  digest         keccak256(batchJSON) computed by the backend.
+     * @param  messageCount   Number of messages included in the batch.
+     * @return batchIndex     Index of the newly created batch in `batches[]`.
+     */
+    function recordBatch(
+        string calldata conversationId,
+        bytes32         digest,
+        uint256         messageCount
+    ) external onlyOwner returns (uint256 batchIndex) {
+        batchIndex = batches.length;
+
+        batches.push(BatchRecord({
+            digest:         digest,
+            timestamp:      block.timestamp,
+            recorder:       msg.sender,
+            conversationId: conversationId,
+            messageCount:   messageCount
+        }));
+
+        conversationBatchIndexes[conversationId].push(batchIndex);
+
+        emit BatchDigestRecorded(batchIndex, conversationId, digest, messageCount, block.timestamp);
     }
 
     // -----------------------------------------------------------------------
@@ -143,14 +198,37 @@ contract MessageDigestRegistry is Ownable {
             string  memory conversationId
         )
     {
-        DigestRecord storage r = records[idx]; // reverts on out-of-bounds — intentional
+        DigestRecord storage r = records[idx];
         return (r.digest, r.timestamp, r.recorder, r.conversationId);
     }
 
     /**
+     * @notice Fetch a single batch record by its index.
+     * @param  idx           Batch index (0-based), as returned by recordBatch().
+     * @return digest         Stored keccak256 digest of the batch payload.
+     * @return timestamp      Block timestamp when the batch was recorded.
+     * @return recorder       Address that submitted the batch.
+     * @return conversationId Off-chain thread identifier.
+     * @return messageCount   Number of messages in the batch.
+     */
+    function getBatch(uint256 idx)
+        external
+        view
+        returns (
+            bytes32 digest,
+            uint256 timestamp,
+            address recorder,
+            string  memory conversationId,
+            uint256 messageCount
+        )
+    {
+        BatchRecord storage b = batches[idx];
+        return (b.digest, b.timestamp, b.recorder, b.conversationId, b.messageCount);
+    }
+
+    /**
      * @notice Return all record indexes associated with a given conversationId.
-     * @dev    Callers fetch each record individually via getRecord(). Returns an
-     *         empty array if no records exist for the given ID — no revert.
+     * @dev    Returns an empty array if no records exist for the given ID — no revert.
      * @param  conversationId Off-chain thread identifier to look up.
      * @return                Array of record indexes into `records[]`.
      */
@@ -164,12 +242,17 @@ contract MessageDigestRegistry is Ownable {
 
     /**
      * @notice Return the total number of records stored across all conversations.
-     * @dev    Equivalent to `records.length`. Exposed as an explicit function
-     *         because some ABI clients cannot read the length of a public
-     *         dynamic array without a dedicated getter.
      * @return Total record count.
      */
     function getRecordCount() external view returns (uint256) {
         return records.length;
+    }
+
+    /**
+     * @notice Return the total number of batch records stored.
+     * @return Total batch count.
+     */
+    function getBatchCount() external view returns (uint256) {
+        return batches.length;
     }
 }

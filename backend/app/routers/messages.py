@@ -1,14 +1,15 @@
 """
 Messages router — send, inbox, and fetch endpoints.
 
-After each message is persisted, a BackgroundTask records a keccak256 digest
-of the ciphertext on Ethereum Sepolia via web3.py.  The HTTP response is
-returned immediately; the background task runs after the DB session commits,
-then updates the message row once the Ethereum transaction is confirmed.
+After each message is persisted, a BackgroundTask pushes a batch entry to
+Redis. When the batch accumulator for a conversation hits BATCH_SIZE (10),
+flush_batch_if_ready() fires a single recordBatch() tx on-chain, covering
+all 10 messages in one Ethereum transaction.
 """
 
 import base64
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -21,7 +22,7 @@ from app.models.message import Message
 from app.models.user import User
 from app.schemas.message import MessageResponse, SendMessageRequest, SendMessageResponse
 from app.services.auth_service import get_current_user
-from app.services.blockchain_service import is_configured, record_conversation_digest
+from app.services.blockchain_service import is_configured, flush_batch_if_ready, push_to_batch
 
 logger = logging.getLogger(__name__)
 
@@ -58,52 +59,45 @@ def _to_response(msg: Message, sender_username: str) -> MessageResponse:
         blockchain_tx_hash=tx_hash,
         blockchain_block_number=msg.blockchain_block_number,
         blockchain_record_index=msg.blockchain_record_index,
+        blockchain_batch_index=msg.blockchain_batch_index,
         blockchain_confirmed=tx_hash is not None,
         etherscan_url=etherscan,
     )
 
 
 # ---------------------------------------------------------------------------
-# Blockchain background task
+# Blockchain background task (Tier 1 — batch accumulator)
 # ---------------------------------------------------------------------------
 
-async def _record_blockchain(
+async def _push_to_batch_and_maybe_flush(
     message_id: str,
     conversation_id: str,
-    conversation_text: str,
+    sender_id: str,
+    timestamp: str,
+    content_hash: str,
 ) -> None:
     """
-    Record a keccak256 digest on-chain then update the message row.
+    Push this message into the per-conversation Redis batch list.
+    If the list has reached BATCH_SIZE, flush_batch_if_ready() fires
+    a single recordBatch() tx covering all accumulated messages.
 
     Scheduled via FastAPI BackgroundTasks so it runs after the HTTP response
-    is sent — which is after get_db() has committed the INSERT.  Opens its
-    own session so it is independent of the request session lifecycle.
+    is sent — guaranteeing the INSERT is committed before we do any UPDATE.
     Never raises: errors are logged and the app continues normally.
     """
     if not is_configured():
         return
     try:
-        result = await record_conversation_digest(conversation_id, conversation_text)
-        async with AsyncSessionLocal() as session:
-            await session.execute(
-                update(Message)
-                .where(Message.id == message_id)
-                .values(
-                    blockchain_tx_hash=result.get("tx_hash"),
-                    blockchain_block_number=result.get("block_number"),
-                    blockchain_record_index=result.get("record_index"),
-                )
-            )
-            await session.commit()
-        logger.info(
-            "blockchain record confirmed | msg=%s tx=%s block=%s idx=%s",
+        new_length = await push_to_batch(
+            conversation_id,
             message_id,
-            result.get("tx_hash"),
-            result.get("block_number"),
-            result.get("record_index"),
+            sender_id,
+            timestamp,
+            content_hash,
         )
+        await flush_batch_if_ready(conversation_id, new_length)
     except Exception as exc:
-        logger.error("blockchain record failed for message %s: %s", message_id, exc)
+        logger.error("batch push failed for message %s: %s", message_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -145,14 +139,18 @@ async def send_message(
     db.add(msg)
     await db.flush()  # populate msg.id before the task captures it
 
-    conv_id = _conversation_id(current_user.id, recipient.id)
-    # Schedule after response — BackgroundTasks run after get_db() commits,
-    # so the INSERT is visible when _record_blockchain opens its own session.
+    conv_id   = _conversation_id(current_user.id, recipient.id)
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    # Tier 1: push to batch accumulator; flush when BATCH_SIZE is reached.
+    # BackgroundTasks run after get_db() commits so the INSERT is visible.
     background_tasks.add_task(
-        _record_blockchain,
+        _push_to_batch_and_maybe_flush,
         str(msg.id),
         conv_id,
-        body.ciphertext,  # hash the base64 string; verify endpoint re-encodes the same way
+        str(current_user.id),
+        timestamp,
+        body.ciphertext,  # base64 ciphertext used as content_hash input
     )
 
     return SendMessageResponse(id=str(msg.id))
