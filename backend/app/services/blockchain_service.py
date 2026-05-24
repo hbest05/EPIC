@@ -153,6 +153,16 @@ def is_configured() -> bool:
 blockchain_configured = is_configured
 
 
+def compute_content_hash(ciphertext_b64: str) -> str:
+    """
+    Compute keccak256 of the ciphertext string.
+    Used to pre-hash content before storing in the Redis batch accumulator,
+    keeping the stored value compact and consistent with what goes on-chain.
+    """
+    w3 = _w3 if _w3 is not None else AsyncWeb3()
+    return w3.keccak(text=ciphertext_b64).hex()
+
+
 # ---------------------------------------------------------------------------
 # Core async functions
 # ---------------------------------------------------------------------------
@@ -502,17 +512,19 @@ async def record_event_triggered_digest(
     conversation_id: str,
     message_id: str,
     conversation_text: str,
-) -> None:
+) -> Optional[dict]:
     """
     Record a single-message digest immediately on-chain using recordDigest().
     Uses a composite conversationId of the form '<conv_id>:event:<msg_id>'
     so event-triggered records are distinguishable from batch records in the
     contract's indexes without conflicting with the batch accumulator key.
 
+    Returns {"tx_hash": str, "block_number": int, "record_index": int | None}
+    on success, or None if blockchain is not configured or an error occurs.
     Never raises — errors are logged.
     """
     if not is_configured():
-        return
+        return None
     composite_id = f"{conversation_id}:event:{message_id}"
     try:
         result = await record_conversation_digest(composite_id, conversation_text)
@@ -531,8 +543,10 @@ async def record_event_triggered_digest(
             "event-triggered record confirmed | msg=%s tx=%s",
             message_id, result.get("tx_hash"),
         )
+        return result
     except Exception as exc:
         logger.error("event-triggered record failed for msg=%s: %s", message_id, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------

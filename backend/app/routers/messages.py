@@ -20,9 +20,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import AsyncSessionLocal, get_db
 from app.models.message import Message
 from app.models.user import User
-from app.schemas.message import MessageResponse, SendMessageRequest, SendMessageResponse
+from app.schemas.message import (
+    ForwardMessageRequest,
+    ForwardMessageResponse,
+    MessageResponse,
+    SendMessageRequest,
+    SendMessageResponse,
+)
 from app.services.auth_service import get_current_user
-from app.services.blockchain_service import is_configured, flush_batch_if_ready, push_to_batch
+from app.services.blockchain_service import (
+    compute_content_hash,
+    is_configured,
+    flush_batch_if_ready,
+    push_to_batch,
+    record_event_triggered_digest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +151,9 @@ async def send_message(
     db.add(msg)
     await db.flush()  # populate msg.id before the task captures it
 
-    conv_id   = _conversation_id(current_user.id, recipient.id)
-    timestamp = datetime.now(timezone.utc).isoformat()
+    conv_id      = _conversation_id(current_user.id, recipient.id)
+    timestamp    = datetime.now(timezone.utc).isoformat()
+    content_hash = compute_content_hash(body.ciphertext)
 
     # Tier 1: push to batch accumulator; flush when BATCH_SIZE is reached.
     # BackgroundTasks run after get_db() commits so the INSERT is visible.
@@ -150,10 +163,70 @@ async def send_message(
         conv_id,
         str(current_user.id),
         timestamp,
-        body.ciphertext,  # base64 ciphertext used as content_hash input
+        content_hash,
     )
 
     return SendMessageResponse(id=str(msg.id))
+
+
+# ---------------------------------------------------------------------------
+# POST /{message_id}/forward
+# ---------------------------------------------------------------------------
+
+@router.post("/{message_id}/forward", response_model=ForwardMessageResponse, status_code=status.HTTP_201_CREATED)
+async def forward_message(
+    message_id: UUID,
+    body: ForwardMessageRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession  = Depends(get_db),
+):
+    # 1. Fetch original message
+    result = await db.execute(select(Message).where(Message.id == message_id))
+    original = result.scalar_one_or_none()
+    if original is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    # 2. Caller must be sender or recipient of the original message
+    if original.sender_id != current_user.id and original.recipient_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    # 3. Target user must exist
+    result = await db.execute(select(User).where(User.id == body.target_user_id))
+    target_user = result.scalar_one_or_none()
+    if target_user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target user not found")
+
+    # 4. Persist the forwarded message in its own session so the INSERT is
+    #    committed before record_event_triggered_digest opens its own session
+    #    to back-fill the tx_hash — without a prior commit the UPDATE would
+    #    target an invisible row.
+    async with AsyncSessionLocal() as session:
+        new_msg = Message(
+            sender_id=current_user.id,
+            recipient_id=body.target_user_id,
+            ciphertext=original.ciphertext,
+            hpke_enc_blob=original.hpke_enc_blob,
+            nonce=original.nonce,
+            forwarded_from_id=original.id,
+        )
+        session.add(new_msg)
+        await session.flush()
+        new_msg_id = str(new_msg.id)
+        await session.commit()
+
+    # 5. Tier 2: await blockchain recording directly — timestamp is legally significant
+    conv_id   = _conversation_id(original.sender_id, original.recipient_id)
+    b64_ctext = base64.b64encode(original.ciphertext).decode()
+    blockchain_result = await record_event_triggered_digest(conv_id, new_msg_id, b64_ctext)
+
+    tx_hash   = blockchain_result.get("tx_hash") if blockchain_result else None
+    etherscan = f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+
+    return ForwardMessageResponse(
+        id=UUID(new_msg_id),
+        tx_hash=tx_hash,
+        etherscan_url=etherscan,
+    )
 
 
 # ---------------------------------------------------------------------------

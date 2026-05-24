@@ -7,6 +7,7 @@ after receiving.  The API deals exclusively with ciphertext blobs and metadata.
 
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +48,32 @@ class MessageResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ---------------------------------------------------------------------------
+# Message forwarding
+# ---------------------------------------------------------------------------
+
+class ForwardMessageRequest(BaseModel):
+    target_user_id: UUID
+
+
+class ForwardMessageResponse(BaseModel):
+    id: UUID
+    tx_hash: Optional[str] = None
+    etherscan_url: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Access revocation
+# ---------------------------------------------------------------------------
+
+class RevokeAccessResponse(BaseModel):
+    revoked_user_id: UUID
+    conversation_id: str
+    tx_hash: Optional[str] = None
+    etherscan_url: Optional[str] = None
+    revoked_at: datetime
 
 
 # ---------------------------------------------------------------------------
