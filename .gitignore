@@ -37,11 +37,6 @@ blockchain/artifacts/
 blockchain/cache/
 blockchain/typechain-types/
 
-# MessageDigestRegistry deployment output — contains live contract address, not secrets,
-# but regenerated on every deploy so should not be committed.
-deployedAddress.json
-blockchain/deployedAddress.json
-
 # Frontend (no build step currently)
 frontend/node_modules/
 
