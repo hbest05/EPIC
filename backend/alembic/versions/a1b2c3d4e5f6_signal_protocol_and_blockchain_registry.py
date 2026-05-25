@@ -42,10 +42,9 @@ def upgrade() -> None:
     op.drop_constraint("user_keys_user_id_key", "user_keys", type_="unique")
 
     # Add key_type — use a temporary default so existing rows satisfy NOT NULL.
-    op.add_column(
-        "user_keys",
-        sa.Column("key_type", sa.String(16), nullable=True),
-    )
+    conn.execute(sa.text(
+        "ALTER TABLE user_keys ADD COLUMN IF NOT EXISTS key_type VARCHAR(16)"
+    ))
     op.execute("UPDATE user_keys SET key_type = 'x25519' WHERE key_type IS NULL")
     op.alter_column("user_keys", "key_type", nullable=False)
 
@@ -188,19 +187,19 @@ def upgrade() -> None:
     # -------------------------------------------------------------------------
     # messages — Signal Protocol columns
     # -------------------------------------------------------------------------
-    op.add_column("messages", sa.Column("ratchet_public_key", sa.String(512), nullable=True))
-    op.add_column("messages", sa.Column("previous_chain_length", sa.Integer(), nullable=True))
-    op.add_column("messages", sa.Column("message_index", sa.Integer(), nullable=True))
-    op.add_column(
-        "messages",
-        sa.Column(
-            "session_id",
-            sa.UUID(),
-            sa.ForeignKey("ratchet_sessions.id", ondelete="SET NULL"),
-            nullable=True,
-            index=True,
-        ),
-    )
+    conn.execute(sa.text(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS ratchet_public_key VARCHAR(512)"
+    ))
+    conn.execute(sa.text(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS previous_chain_length INTEGER"
+    ))
+    conn.execute(sa.text(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_index INTEGER"
+    ))
+    conn.execute(sa.text(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS"
+        " session_id UUID REFERENCES ratchet_sessions(id) ON DELETE SET NULL"
+    ))
     conn.execute(sa.text(
         "CREATE INDEX IF NOT EXISTS ix_messages_session_id"
         " ON messages (session_id)"
@@ -209,23 +208,27 @@ def upgrade() -> None:
     # -------------------------------------------------------------------------
     # messages — blockchain registry columns (the main goal of this PR)
     # -------------------------------------------------------------------------
-    op.add_column("messages", sa.Column("blockchain_block_number", sa.Integer(), nullable=True))
-    op.add_column("messages", sa.Column("blockchain_record_index", sa.Integer(), nullable=True))
+    conn.execute(sa.text(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS blockchain_block_number INTEGER"
+    ))
+    conn.execute(sa.text(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS blockchain_record_index INTEGER"
+    ))
 
 
 def downgrade() -> None:
     conn = op.get_bind()
 
     # Blockchain registry columns
-    op.drop_column("messages", "blockchain_record_index")
-    op.drop_column("messages", "blockchain_block_number")
+    conn.execute(sa.text("ALTER TABLE messages DROP COLUMN IF EXISTS blockchain_record_index"))
+    conn.execute(sa.text("ALTER TABLE messages DROP COLUMN IF EXISTS blockchain_block_number"))
 
     # Signal Protocol columns
     conn.execute(sa.text("DROP INDEX IF EXISTS ix_messages_session_id"))
-    op.drop_column("messages", "session_id")
-    op.drop_column("messages", "message_index")
-    op.drop_column("messages", "previous_chain_length")
-    op.drop_column("messages", "ratchet_public_key")
+    conn.execute(sa.text("ALTER TABLE messages DROP COLUMN IF EXISTS session_id"))
+    conn.execute(sa.text("ALTER TABLE messages DROP COLUMN IF EXISTS message_index"))
+    conn.execute(sa.text("ALTER TABLE messages DROP COLUMN IF EXISTS previous_chain_length"))
+    conn.execute(sa.text("ALTER TABLE messages DROP COLUMN IF EXISTS ratchet_public_key"))
 
     # Signal Protocol tables (reverse creation order — FK dependencies)
     conn.execute(sa.text("DROP INDEX IF EXISTS ix_skipped_message_keys_session_ratchet_index"))
@@ -248,5 +251,5 @@ def downgrade() -> None:
 
     # user_keys — restore original (broken) state
     conn.execute(sa.text("DROP INDEX IF EXISTS ix_user_keys_user_id_key_type"))
-    op.drop_column("user_keys", "key_type")
+    conn.execute(sa.text("ALTER TABLE user_keys DROP COLUMN IF EXISTS key_type"))
     op.create_unique_constraint("user_keys_user_id_key", "user_keys", ["user_id"])
