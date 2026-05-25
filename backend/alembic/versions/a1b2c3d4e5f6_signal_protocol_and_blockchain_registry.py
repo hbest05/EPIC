@@ -89,6 +89,7 @@ def upgrade() -> None:
             "local_user_id", "remote_user_id",
             name="uq_ratchet_sessions_local_remote",
         ),
+        if_not_exists=True,
     )
     op.create_index("ix_ratchet_sessions_local_user_id", "ratchet_sessions", ["local_user_id"])
     op.create_index("ix_ratchet_sessions_remote_user_id", "ratchet_sessions", ["remote_user_id"])
@@ -112,6 +113,7 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+        if_not_exists=True,
     )
     op.create_index(
         "ix_signed_prekeys_user_id_key_id",
@@ -137,6 +139,7 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+        if_not_exists=True,
     )
     op.create_index(
         "ix_one_time_prekeys_user_id_used",
@@ -166,6 +169,7 @@ def upgrade() -> None:
             "session_id", "ratchet_public_key", "message_index",
             name="uq_skipped_message_keys_session_ratchet_index",
         ),
+        if_not_exists=True,
     )
     op.create_index("ix_skipped_message_keys_session_id", "skipped_message_keys", ["session_id"])
     op.create_index(
@@ -214,17 +218,17 @@ def downgrade() -> None:
     # Signal Protocol tables (reverse creation order — FK dependencies)
     op.drop_index("ix_skipped_message_keys_session_ratchet_index", table_name="skipped_message_keys")
     op.drop_index("ix_skipped_message_keys_session_id", table_name="skipped_message_keys")
-    op.drop_table("skipped_message_keys")
+    op.drop_table("skipped_message_keys", if_exists=True)
 
     op.drop_index("ix_one_time_prekeys_user_id_used", table_name="one_time_prekeys")
-    op.drop_table("one_time_prekeys")
+    op.drop_table("one_time_prekeys", if_exists=True)
 
     op.drop_index("ix_signed_prekeys_user_id_key_id", table_name="signed_prekeys")
-    op.drop_table("signed_prekeys")
+    op.drop_table("signed_prekeys", if_exists=True)
 
     op.drop_index("ix_ratchet_sessions_remote_user_id", table_name="ratchet_sessions")
     op.drop_index("ix_ratchet_sessions_local_user_id", table_name="ratchet_sessions")
-    op.drop_table("ratchet_sessions")
+    op.drop_table("ratchet_sessions", if_exists=True)
 
     # user_keys — restore original (broken) state
     op.drop_index("ix_user_keys_user_id_key_type", table_name="user_keys")
