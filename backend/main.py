@@ -57,6 +57,8 @@ app.include_router(blockchain.router,               prefix="/api/blockchain",   
 app.include_router(blockchain.verify_router,        prefix="/api/verify",        tags=["verify"])
 # Tier 3: conversation close endpoint
 app.include_router(blockchain.conversations_router, prefix="/api/conversations", tags=["conversations"])
+# Public verify — no auth required, used by the standalone verify.html page
+app.include_router(blockchain.public_router,        prefix="/public/verify",     tags=["verify-public"])
 
 
 @app.on_event("startup")

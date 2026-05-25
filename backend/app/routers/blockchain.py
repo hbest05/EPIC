@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 router               = APIRouter()
 verify_router        = APIRouter()
 conversations_router = APIRouter()
+public_router        = APIRouter()   # no auth — used by the standalone verify page
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +170,21 @@ async def verify_blockchain_alias(
                                 "If omitted, the stored ciphertext is used."),
     current_user: User = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),
+):
+    return await _do_verify(conversation_id, text, db)
+
+
+# ---------------------------------------------------------------------------
+# GET /public/verify/{conversation_id}  — no auth, for standalone verify page
+# ---------------------------------------------------------------------------
+
+@public_router.get("/{conversation_id}", response_model=BlockchainVerifyResponse)
+async def verify_blockchain_public(
+    conversation_id: str,
+    text: Optional[str] = Query(default=None, max_length=65536,
+                                description="Conversation text to verify. "
+                                "If omitted, the stored ciphertext is used."),
+    db: AsyncSession = Depends(get_db),
 ):
     return await _do_verify(conversation_id, text, db)
 
