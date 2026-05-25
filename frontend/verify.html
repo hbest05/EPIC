@@ -32,8 +32,10 @@
 <h1>SecureMsg — Blockchain Tamper-Evidence Verification</h1>
 <p style="font-size:0.85rem;color:#555;">
   Independently verify that a conversation digest exists on Ethereum Sepolia.
-  No login required. Your text is hashed locally with keccak256 and compared
-  against the on-chain record — the server never receives your plaintext.
+  No login required. When you provide ciphertext, it is sent to the server as
+  a URL parameter so the server can compute and compare the hash — your input
+  is not stored. The local keccak256 hash is also computed in your browser
+  using ethers.js so you can verify independently without trusting the server.
 </p>
 
 <label for="convId">Conversation ID <span style="font-weight:normal;color:#777;">(format: {uuid}_{uuid})</span></label>

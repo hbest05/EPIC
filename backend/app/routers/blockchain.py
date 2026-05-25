@@ -16,7 +16,7 @@ import logging
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ from app.models.message import Message
 from app.models.revocation import ConversationRevocation
 from app.schemas.message import BlockchainVerifyResponse, RevokeAccessResponse
 from app.services.auth_service import get_current_user
+from app.services.rate_limit import limiter
 from app.services.blockchain_service import (
     blockchain_configured,
     record_event_triggered_digest,
@@ -179,7 +180,9 @@ async def verify_blockchain_alias(
 # ---------------------------------------------------------------------------
 
 @public_router.get("/{conversation_id}", response_model=BlockchainVerifyResponse)
+@limiter.limit("30/minute")
 async def verify_blockchain_public(
+    request: Request,
     conversation_id: str,
     text: Optional[str] = Query(default=None, max_length=65536,
                                 description="Conversation text to verify. "

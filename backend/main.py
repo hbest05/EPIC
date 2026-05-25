@@ -38,10 +38,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Execution order on response: route handler  → CORS → CSRF → SecurityHeaders
 app.add_middleware(CSRFMiddleware)
 
-# TODO: Restrict origins to the deployed frontend URL in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
