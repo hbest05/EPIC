@@ -31,6 +31,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    conn = op.get_bind()
+
     # -------------------------------------------------------------------------
     # user_keys — add key_type; fix broken unique constraint
     # -------------------------------------------------------------------------
@@ -48,13 +50,10 @@ def upgrade() -> None:
     op.alter_column("user_keys", "key_type", nullable=False)
 
     # Composite index replaces the dropped unique constraint.
-    op.create_index(
-        "ix_user_keys_user_id_key_type",
-        "user_keys",
-        ["user_id", "key_type"],
-    )
-
-    conn = op.get_bind()
+    conn.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_user_keys_user_id_key_type"
+        " ON user_keys (user_id, key_type)"
+    ))
 
     # -------------------------------------------------------------------------
     # ratchet_sessions — must exist before messages.session_id FK can be added
@@ -93,8 +92,14 @@ def upgrade() -> None:
                 name="uq_ratchet_sessions_local_remote",
             ),
         )
-    op.create_index("ix_ratchet_sessions_local_user_id", "ratchet_sessions", ["local_user_id"])
-    op.create_index("ix_ratchet_sessions_remote_user_id", "ratchet_sessions", ["remote_user_id"])
+    conn.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_ratchet_sessions_local_user_id"
+        " ON ratchet_sessions (local_user_id)"
+    ))
+    conn.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_ratchet_sessions_remote_user_id"
+        " ON ratchet_sessions (remote_user_id)"
+    ))
 
     # -------------------------------------------------------------------------
     # signed_prekeys
@@ -117,11 +122,10 @@ def upgrade() -> None:
             sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
             sa.PrimaryKeyConstraint("id"),
         )
-    op.create_index(
-        "ix_signed_prekeys_user_id_key_id",
-        "signed_prekeys",
-        ["user_id", "key_id"],
-    )
+    conn.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_signed_prekeys_user_id_key_id"
+        " ON signed_prekeys (user_id, key_id)"
+    ))
 
     # -------------------------------------------------------------------------
     # one_time_prekeys
@@ -143,11 +147,10 @@ def upgrade() -> None:
             sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
             sa.PrimaryKeyConstraint("id"),
         )
-    op.create_index(
-        "ix_one_time_prekeys_user_id_used",
-        "one_time_prekeys",
-        ["user_id", "used"],
-    )
+    conn.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_one_time_prekeys_user_id_used"
+        " ON one_time_prekeys (user_id, used)"
+    ))
 
     # -------------------------------------------------------------------------
     # skipped_message_keys
@@ -173,12 +176,14 @@ def upgrade() -> None:
                 name="uq_skipped_message_keys_session_ratchet_index",
             ),
         )
-    op.create_index("ix_skipped_message_keys_session_id", "skipped_message_keys", ["session_id"])
-    op.create_index(
-        "ix_skipped_message_keys_session_ratchet_index",
-        "skipped_message_keys",
-        ["session_id", "ratchet_public_key", "message_index"],
-    )
+    conn.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_skipped_message_keys_session_id"
+        " ON skipped_message_keys (session_id)"
+    ))
+    conn.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_skipped_message_keys_session_ratchet_index"
+        " ON skipped_message_keys (session_id, ratchet_public_key, message_index)"
+    ))
 
     # -------------------------------------------------------------------------
     # messages — Signal Protocol columns
@@ -196,7 +201,10 @@ def upgrade() -> None:
             index=True,
         ),
     )
-    op.create_index("ix_messages_session_id", "messages", ["session_id"])
+    conn.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS ix_messages_session_id"
+        " ON messages (session_id)"
+    ))
 
     # -------------------------------------------------------------------------
     # messages — blockchain registry columns (the main goal of this PR)
@@ -206,39 +214,39 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+
     # Blockchain registry columns
     op.drop_column("messages", "blockchain_record_index")
     op.drop_column("messages", "blockchain_block_number")
 
     # Signal Protocol columns
-    op.drop_index("ix_messages_session_id", table_name="messages")
+    conn.execute(sa.text("DROP INDEX IF EXISTS ix_messages_session_id"))
     op.drop_column("messages", "session_id")
     op.drop_column("messages", "message_index")
     op.drop_column("messages", "previous_chain_length")
     op.drop_column("messages", "ratchet_public_key")
 
-    conn = op.get_bind()
-
     # Signal Protocol tables (reverse creation order — FK dependencies)
-    op.drop_index("ix_skipped_message_keys_session_ratchet_index", table_name="skipped_message_keys")
-    op.drop_index("ix_skipped_message_keys_session_id", table_name="skipped_message_keys")
+    conn.execute(sa.text("DROP INDEX IF EXISTS ix_skipped_message_keys_session_ratchet_index"))
+    conn.execute(sa.text("DROP INDEX IF EXISTS ix_skipped_message_keys_session_id"))
     if conn.dialect.has_table(conn, "skipped_message_keys"):
         op.drop_table("skipped_message_keys")
 
-    op.drop_index("ix_one_time_prekeys_user_id_used", table_name="one_time_prekeys")
+    conn.execute(sa.text("DROP INDEX IF EXISTS ix_one_time_prekeys_user_id_used"))
     if conn.dialect.has_table(conn, "one_time_prekeys"):
         op.drop_table("one_time_prekeys")
 
-    op.drop_index("ix_signed_prekeys_user_id_key_id", table_name="signed_prekeys")
+    conn.execute(sa.text("DROP INDEX IF EXISTS ix_signed_prekeys_user_id_key_id"))
     if conn.dialect.has_table(conn, "signed_prekeys"):
         op.drop_table("signed_prekeys")
 
-    op.drop_index("ix_ratchet_sessions_remote_user_id", table_name="ratchet_sessions")
-    op.drop_index("ix_ratchet_sessions_local_user_id", table_name="ratchet_sessions")
+    conn.execute(sa.text("DROP INDEX IF EXISTS ix_ratchet_sessions_remote_user_id"))
+    conn.execute(sa.text("DROP INDEX IF EXISTS ix_ratchet_sessions_local_user_id"))
     if conn.dialect.has_table(conn, "ratchet_sessions"):
         op.drop_table("ratchet_sessions")
 
     # user_keys — restore original (broken) state
-    op.drop_index("ix_user_keys_user_id_key_type", table_name="user_keys")
+    conn.execute(sa.text("DROP INDEX IF EXISTS ix_user_keys_user_id_key_type"))
     op.drop_column("user_keys", "key_type")
     op.create_unique_constraint("user_keys_user_id_key", "user_keys", ["user_id"])
