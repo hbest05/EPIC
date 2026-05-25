@@ -71,7 +71,7 @@ target_link_libraries(SecureMsg PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(SecureMsg PRIVATE Ws2_32)
+    target_link_libraries(SecureMsg PRIVATE Ws2_32 Crypt32)
 endif()
 
 # ---------------------------------------------------------------------------

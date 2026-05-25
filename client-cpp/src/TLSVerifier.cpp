@@ -19,6 +19,16 @@
 #include <memory>
 #include <mutex>
 
+#ifdef _WIN32
+// windows.h must precede wincrypt.h. Undef the X509_NAME macro Windows defines,
+// which collides with OpenSSL's X509_NAME typedef.
+#include <windows.h>
+#include <wincrypt.h>
+#ifdef X509_NAME
+#undef X509_NAME
+#endif
+#endif
+
 namespace {
 
 void ensureOpenSSL()
@@ -54,6 +64,33 @@ std::string extractCN(X509* cert)
     return buf;
 }
 
+#ifdef _WIN32
+// Load Windows root CAs into the OpenSSL trust store. SSL_CTX_set_default_verify_paths
+// looks at OpenSSL's compiled-in path, which on Windows builds is typically empty —
+// without this, no public CAs are trusted and every handshake fails verification.
+void loadWindowsRootCerts(SSL_CTX* ctx)
+{
+    X509_STORE* store = SSL_CTX_get_cert_store(ctx);
+    if (!store) return;
+
+    for (const char* storeName : {"ROOT", "CA"}) {
+        HCERTSTORE hStore = CertOpenSystemStoreA(0, storeName);
+        if (!hStore) continue;
+
+        PCCERT_CONTEXT pCtx = nullptr;
+        while ((pCtx = CertEnumCertificatesInStore(hStore, pCtx)) != nullptr) {
+            const unsigned char* encoded = pCtx->pbCertEncoded;
+            X509* x509 = d2i_X509(nullptr, &encoded, static_cast<long>(pCtx->cbCertEncoded));
+            if (x509) {
+                X509_STORE_add_cert(store, x509);
+                X509_free(x509);
+            }
+        }
+        CertCloseStore(hStore, 0);
+    }
+}
+#endif
+
 } // namespace
 
 TLSVerifier::VerifyResult TLSVerifier::verify(const std::string& hostname, uint16_t port)
@@ -78,6 +115,9 @@ TLSVerifier::VerifyResult TLSVerifier::verify(const std::string& hostname, uint1
     SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
     SSL_CTX_set_default_verify_paths(ctx);
+#ifdef _WIN32
+    loadWindowsRootCerts(ctx);
+#endif
 
     SSL* ssl = SSL_new(ctx);
     if (!ssl) {
