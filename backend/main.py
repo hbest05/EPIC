@@ -66,7 +66,7 @@ app.include_router(blockchain.conversations_router, prefix="/api/conversations",
 app.include_router(blockchain.public_router,        prefix="/public/verify",     tags=["verify-public"])
 
 
-app.mount("/static", StaticFiles(directory="frontend"), name="static")
+app.mount("/static", StaticFiles(directory="/app/frontend"), name="static")
 
 
 @app.on_event("startup")
