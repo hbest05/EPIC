@@ -10,6 +10,7 @@ Responsibilities:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -63,6 +64,9 @@ app.include_router(blockchain.verify_router,        prefix="/api/verify",       
 app.include_router(blockchain.conversations_router, prefix="/api/conversations", tags=["conversations"])
 # Public verify — no auth required, used by the standalone verify.html page
 app.include_router(blockchain.public_router,        prefix="/public/verify",     tags=["verify-public"])
+
+
+app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
 
 @app.on_event("startup")
