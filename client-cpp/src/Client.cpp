@@ -1,206 +1,318 @@
 /**
- * Client.cpp — Application controller implementation.
+ * Client.cpp — REST controller implementation.
+ *
+ * libcurl with: TLS 1.2 floor, peer + hostname verification on, JSON body
+ * for every request, and a per-process cookie jar so the backend's
+ * httpOnly access_token cookie persists across calls. After /auth/login,
+ * refreshCsrfToken() extracts the readable csrf_token cookie and
+ * httpRequest() echoes it in X-CSRF-Token on every mutating call.
  */
 
 #include "Client.hpp"
-#include <QDebug>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QVBoxLayout>
-#include <QLabel>
+#include "CryptoDaemonClient.hpp"
+
+#include <QtCore/QDateTime>
+#include <QtCore/QDir>
+#include <QtCore/QFile>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QStandardPaths>
+#include <QtCore/QUuid>
+
 #include <curl/curl.h>
 
-// libcurl write callback — appends received bytes to a QByteArray
-static size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata)
+namespace {
+
+size_t writeToByteArray(char* ptr, size_t size, size_t nmemb, void* userdata)
 {
-    auto* buffer = static_cast<QByteArray*>(userdata);
-    buffer->append(ptr, static_cast<qsizetype>(size * nmemb));
+    auto* buf = static_cast<QByteArray*>(userdata);
+    buf->append(ptr, static_cast<qsizetype>(size * nmemb));
     return size * nmemb;
 }
 
-Client::Client(QWidget* parent)
-    : QMainWindow(parent)
-    , m_store(new MessageStore(this))
-    , m_pollTimer(new QTimer(this))
+QString utf8(const QByteArray& b) { return QString::fromUtf8(b); }
+
+} // namespace
+
+Client::Client(std::shared_ptr<CryptoDaemonClient> daemon)
+    : m_daemon(std::move(daemon))
 {
-    setupUi();
-    connect(m_pollTimer, &QTimer::timeout, this, &Client::pollInbox);
-    // TODO: Start poll timer after successful login
 }
 
 Client::~Client()
 {
-    // QObjects parented to this are cleaned up by Qt automatically
+    if (!m_cookieJarPath.empty()) {
+        QFile::remove(QString::fromStdString(m_cookieJarPath));
+    }
 }
 
-void Client::setupUi()
+void Client::initialize()
 {
-    // TODO: Build Qt widget hierarchy — login view + chat view
-    // For now, show a placeholder label
-    auto* placeholder = new QLabel("SecureMsg — UI not yet built", this);
-    placeholder->setAlignment(Qt::AlignCenter);
-    setCentralWidget(placeholder);
-    setWindowTitle("SecureMsg");
-    resize(900, 600);
+    static bool curlInitialized = false;
+    if (!curlInitialized) {
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        curlInitialized = true;
+    }
+
+    // Per-process cookie jar — keeps the access_token + csrf_token cookies
+    // alive across calls without persisting between runs.
+    const QString tmpDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    QDir().mkpath(tmpDir);
+    const QString jar = tmpDir + QStringLiteral("/securemsg-cookies-") +
+                        QUuid::createUuid().toString(QUuid::WithoutBraces) +
+                        QStringLiteral(".txt");
+    m_cookieJarPath = jar.toStdString();
 }
 
-void Client::showAuthView()
+QByteArray Client::httpRequest(const QString& method,
+                                const QString& path,
+                                const QByteArray& jsonBody)
 {
-    // TODO: Switch central widget to the login/register form
+    m_lastStatus = 0;
+    m_lastError.clear();
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        m_lastError = QStringLiteral("curl_easy_init failed");
+        return {};
+    }
+
+    QByteArray response;
+    const std::string url = (m_baseUrl + path).toStdString();
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeToByteArray);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    // TLS hardening — explicit floor, full peer + hostname verification.
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+
+    // Persistent cookie jar so backend's session cookie survives between calls.
+    curl_easy_setopt(curl, CURLOPT_COOKIEFILE, m_cookieJarPath.c_str());
+    curl_easy_setopt(curl, CURLOPT_COOKIEJAR,  m_cookieJarPath.c_str());
+
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: application/json");
+
+    // Send CSRF echo header on mutating calls — matches the backend's
+    // double-submit cookie pattern.
+    const bool mutating = (method == QStringLiteral("POST") ||
+                           method == QStringLiteral("PUT")  ||
+                           method == QStringLiteral("DELETE"));
+    QByteArray csrfHeader;
+    if (mutating && !m_csrfToken.isEmpty()) {
+        csrfHeader = "X-CSRF-Token: " + m_csrfToken.toUtf8();
+        headers = curl_slist_append(headers, csrfHeader.constData());
+    }
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+    if (method == QStringLiteral("GET")) {
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    } else if (method == QStringLiteral("POST")) {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonBody.constData());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonBody.size());
+    } else {
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.toUtf8().constData());
+        if (!jsonBody.isEmpty()) {
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonBody.constData());
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonBody.size());
+        }
+    }
+
+    const CURLcode rc = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &m_lastStatus);
+
+    if (rc != CURLE_OK) {
+        m_lastError = QStringLiteral("curl: %1").arg(QString::fromUtf8(curl_easy_strerror(rc)));
+        response.clear();
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return response;
 }
 
-void Client::showChatView()
+void Client::refreshCsrfToken()
 {
-    // TODO: Switch central widget to the chat layout
-    // TODO: Start inbox poll timer
-    m_pollTimer->start(5000);
+    if (m_cookieJarPath.empty()) return;
+
+    // libcurl writes a Netscape-format cookies.txt only on handle teardown,
+    // so the file is current right after the login curl_easy_cleanup() ran.
+    QFile f(QString::fromStdString(m_cookieJarPath));
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+
+    while (!f.atEnd()) {
+        const QByteArray line = f.readLine();
+        if (line.startsWith('#') || line.trimmed().isEmpty()) continue;
+        // Netscape cookie format: domain TAB flag TAB path TAB secure TAB
+        //                         expires TAB name TAB value
+        const QList<QByteArray> cols = line.split('\t');
+        if (cols.size() < 7) continue;
+        if (cols[5].trimmed() == "csrf_token") {
+            m_csrfToken = QString::fromUtf8(cols[6]).trimmed();
+            return;
+        }
+    }
 }
 
-void Client::registerUser(const QString& username, const QString& email, const QString& password)
-{
-    // TODO: m_localUser = std::make_unique<User>(username)
-    // TODO: m_localUser->generateKeyPairs()
-    // TODO: Build JSON body with base64-encoded public keys
-    // TODO: httpPost("/auth/register", body)
-    // TODO: On success → m_localUser->saveKeyFile(keyfilePath, password)
-    // TODO: login(username, password)
-    qWarning() << "Client::registerUser: not implemented yet";
-}
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
 
-void Client::login(const QString& username, const QString& password)
+QString Client::registerUser(const QString& username,
+                             const QString& email,
+                             const QString& password,
+                             const QByteArray& x25519PubKey,
+                             const QByteArray& ed25519PubKey)
 {
     QJsonObject body;
-    body["username"] = username;
-    body["password"] = password;
-    const QByteArray jsonBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    body.insert(QStringLiteral("username"), username);
+    body.insert(QStringLiteral("email"),    email);
+    body.insert(QStringLiteral("password"), password);
+    body.insert(QStringLiteral("x25519_public_key"),  QString::fromUtf8(x25519PubKey.toBase64()));
+    body.insert(QStringLiteral("ed25519_public_key"), QString::fromUtf8(ed25519PubKey.toBase64()));
 
-    const QByteArray response = httpPost("/auth/login", jsonBody);
-    if (response.isEmpty()) {
-        qWarning() << "Client::login: empty response from server";
-        return;
+    const QByteArray resp = httpRequest(QStringLiteral("POST"),
+                                        QStringLiteral("/api/auth/register"),
+                                        QJsonDocument(body).toJson(QJsonDocument::Compact));
+    if (m_lastStatus == 201) return {};
+    if (!m_lastError.isEmpty()) return m_lastError;
+
+    const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+    return obj.value(QStringLiteral("detail")).toString(
+        QStringLiteral("registration failed (HTTP %1)").arg(m_lastStatus));
+}
+
+QString Client::login(const QString& username, const QString& password)
+{
+    QJsonObject body;
+    body.insert(QStringLiteral("username"), username);
+    body.insert(QStringLiteral("password"), password);
+
+    const QByteArray resp = httpRequest(QStringLiteral("POST"),
+                                        QStringLiteral("/api/auth/login"),
+                                        QJsonDocument(body).toJson(QJsonDocument::Compact));
+
+    if (m_lastStatus != 200) {
+        if (!m_lastError.isEmpty()) return m_lastError;
+        const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+        return obj.value(QStringLiteral("detail")).toString(
+            QStringLiteral("login failed (HTTP %1)").arg(m_lastStatus));
     }
 
-    const QJsonDocument doc = QJsonDocument::fromJson(response);
-    if (doc.isNull() || !doc.isObject()) {
-        qWarning() << "Client::login: invalid JSON response";
-        return;
+    refreshCsrfToken();
+    if (m_csrfToken.isEmpty()) {
+        return QStringLiteral("login succeeded but no CSRF cookie was issued");
     }
 
-    const QString token = doc.object().value("access_token").toString();
-    if (token.isEmpty()) {
-        qWarning() << "Client::login: missing access_token in response";
-        return;
-    }
-
-    m_jwtToken = token;
-    m_localUser = std::make_unique<User>(username);
-    showChatView();
+    m_username = username;
+    return {};
 }
 
 void Client::logout()
 {
-    m_jwtToken.clear();
-    m_pollTimer->stop();
-    m_store->clearCache();
-    showAuthView();
+    (void)httpRequest(QStringLiteral("POST"),
+                      QStringLiteral("/api/auth/logout"),
+                      QByteArrayLiteral("{}"));
+    m_csrfToken.clear();
+    m_username.clear();
+    if (!m_cookieJarPath.empty()) {
+        QFile::remove(QString::fromStdString(m_cookieJarPath));
+    }
 }
 
-void Client::fetchContactKeys(const QString& username)
+QString Client::uploadPrekeys(const QByteArray& spkPub,
+                              const QByteArray& spkSig,
+                              const QList<QByteArray>& opks)
 {
-    // TODO: httpGet("/auth/user/" + username + "/pubkeys")
-    // TODO: Parse response, create User with public keys, store in m_contacts
-    Q_UNUSED(username)
-    qWarning() << "Client::fetchContactKeys: not implemented yet";
+    // Backend expects integer key_ids; the daemon doesn't allocate them, so
+    // the client owns the numbering. Use the current Unix second as the SPK
+    // key_id and sequential ids for each OPK in this batch.
+    const qint64 spkKeyId = QDateTime::currentSecsSinceEpoch();
+
+    QJsonObject spk;
+    spk.insert(QStringLiteral("key_id"),    static_cast<double>(spkKeyId));
+    spk.insert(QStringLiteral("public_key"), QString::fromUtf8(spkPub.toBase64()));
+    spk.insert(QStringLiteral("signature"),  QString::fromUtf8(spkSig.toBase64()));
+
+    QJsonArray opkArr;
+    for (int i = 0; i < opks.size(); ++i) {
+        QJsonObject o;
+        o.insert(QStringLiteral("key_id"),     static_cast<double>(spkKeyId * 100 + i));
+        o.insert(QStringLiteral("public_key"), QString::fromUtf8(opks[i].toBase64()));
+        opkArr.append(o);
+    }
+
+    QJsonObject body;
+    body.insert(QStringLiteral("signed_prekey"),    spk);
+    body.insert(QStringLiteral("one_time_prekeys"), opkArr);
+
+    const QByteArray resp = httpRequest(QStringLiteral("POST"),
+                                        QStringLiteral("/api/auth/prekeys"),
+                                        QJsonDocument(body).toJson(QJsonDocument::Compact));
+    if (m_lastStatus == 204 || m_lastStatus == 200) return {};
+    if (!m_lastError.isEmpty()) return m_lastError;
+    const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+    return obj.value(QStringLiteral("detail")).toString(
+        QStringLiteral("prekey upload failed (HTTP %1)").arg(m_lastStatus));
 }
 
-void Client::sendMessage(const QString& recipientUsername, const QString& plaintext)
+QString Client::fetchKeybundle(const QString& username, QJsonObject* out)
 {
-    if (!m_contacts.contains(recipientUsername)) {
-        fetchContactKeys(recipientUsername);
-        return; // TODO: Queue message and retry after keys arrive
+    const QByteArray resp = httpRequest(QStringLiteral("GET"),
+                                        QStringLiteral("/api/auth/user/") + username + QStringLiteral("/keybundle"),
+                                        {});
+    if (m_lastStatus != 200) {
+        if (!m_lastError.isEmpty()) return m_lastError;
+        const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+        return obj.value(QStringLiteral("detail")).toString(
+            QStringLiteral("keybundle fetch failed (HTTP %1)").arg(m_lastStatus));
     }
-
-    // TODO: m_store->encryptMessage(plaintext, *m_contacts[recipientUsername], *m_localUser)
-    // TODO: Serialise to JSON and httpPost("/messages/send", body)
-    Q_UNUSED(plaintext)
-    qWarning() << "Client::sendMessage: not implemented yet";
+    if (out) *out = QJsonDocument::fromJson(resp).object();
+    return {};
 }
 
-void Client::pollInbox()
+QString Client::sendMessage(const QString& recipient,
+                            const QByteArray& ciphertext,
+                            const QByteArray& nonce,
+                            const QByteArray& ratchetPub,
+                            int pn, int n,
+                            const QJsonObject* x3dhHeader)
 {
-    // TODO: httpGet("/messages/inbox") with Authorization header
-    // TODO: For each new message:
-    //   1. Ensure sender's pubkeys are in m_contacts
-    //   2. m_store->decryptMessage(msg, senderUser, *m_localUser)
-    //   3. m_store->addMessage(msg) → triggers newMessageReceived signal → update UI
-    qWarning() << "Client::pollInbox: not implemented yet";
+    QJsonObject body;
+    body.insert(QStringLiteral("recipient_username"), recipient);
+    body.insert(QStringLiteral("ciphertext"),         QString::fromUtf8(ciphertext.toBase64()));
+    body.insert(QStringLiteral("nonce"),              QString::fromUtf8(nonce.toBase64()));
+    body.insert(QStringLiteral("ratchet_pub"),        QString::fromUtf8(ratchetPub.toBase64()));
+    body.insert(QStringLiteral("pn"),                 pn);
+    body.insert(QStringLiteral("n"),                  n);
+    if (x3dhHeader) {
+        body.insert(QStringLiteral("x3dh_header"), *x3dhHeader);
+    }
+
+    const QByteArray resp = httpRequest(QStringLiteral("POST"),
+                                        QStringLiteral("/api/messages/send"),
+                                        QJsonDocument(body).toJson(QJsonDocument::Compact));
+    if (m_lastStatus == 201 || m_lastStatus == 200) return {};
+    if (!m_lastError.isEmpty()) return m_lastError;
+    const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+    return obj.value(QStringLiteral("detail")).toString(
+        QStringLiteral("send failed (HTTP %1)").arg(m_lastStatus));
 }
 
-void Client::onSendClicked()   { /* TODO: Read from UI, call sendMessage() */ }
-void Client::onLoginClicked()  { /* TODO: Read from UI, call login() */ }
-void Client::onRegisterClicked() { /* TODO: Read from UI, call registerUser() */ }
-
-QByteArray Client::httpPost(const QString& endpoint, const QByteArray& jsonBody)
+QString Client::fetchInbox(QJsonArray* out)
 {
-    QByteArray response;
-    CURL* curl = curl_easy_init();
-    if (!curl) return response;
-
-    const std::string url = std::string(API_BASE) + endpoint.toStdString();
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonBody.constData());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonBody.size());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-
-    curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    if (!m_jwtToken.isEmpty()) {
-        const std::string authHeader = "Authorization: Bearer " + m_jwtToken.toStdString();
-        headers = curl_slist_append(headers, authHeader.c_str());
+    const QByteArray resp = httpRequest(QStringLiteral("GET"),
+                                        QStringLiteral("/api/messages/inbox"),
+                                        {});
+    if (m_lastStatus != 200) {
+        if (!m_lastError.isEmpty()) return m_lastError;
+        return QStringLiteral("inbox fetch failed (HTTP %1)").arg(m_lastStatus);
     }
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-    const CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK) {
-        qWarning() << "httpPost" << endpoint << "failed:" << curl_easy_strerror(res);
-        response.clear();
-    }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-    return response;
-}
-
-QByteArray Client::httpGet(const QString& endpoint)
-{
-    QByteArray response;
-    CURL* curl = curl_easy_init();
-    if (!curl) return response;
-
-    const std::string url = std::string(API_BASE) + endpoint.toStdString();
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-
-    curl_slist* headers = nullptr;
-    if (!m_jwtToken.isEmpty()) {
-        const std::string authHeader = "Authorization: Bearer " + m_jwtToken.toStdString();
-        headers = curl_slist_append(headers, authHeader.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    }
-
-    const CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK) {
-        qWarning() << "httpGet" << endpoint << "failed:" << curl_easy_strerror(res);
-        response.clear();
-    }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-    return response;
+    if (out) *out = QJsonDocument::fromJson(resp).array();
+    return {};
 }

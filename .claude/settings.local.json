@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(Get-ChildItem \"c:\\\\Users\\\\m4tth\\\\EPIC\" -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object -ExpandProperty FullName | Sort-Object)"
+      "PowerShell(Get-ChildItem \"c:\\\\Users\\\\m4tth\\\\EPIC\" -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object -ExpandProperty FullName | Sort-Object)",
+      "Bash(python -c \"import cryptography, argon2; print\\('cryptography', cryptography.__version__\\); print\\('argon2', argon2.__version__\\)\")",
+      "Bash(pip install *)",
+      "Bash(python test_daemon.py)"
     ]
   }
 }
