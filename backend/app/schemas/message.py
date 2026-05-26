@@ -16,11 +16,30 @@ from pydantic import BaseModel, Field
 # Send message
 # ---------------------------------------------------------------------------
 
+class X3DHInitHeader(BaseModel):
+    """Header carried on the first Double Ratchet message of a new session.
+
+    Lets the recipient run x3dh_receive to derive the shared root key before
+    decrypting. Absent on every subsequent message in the same session.
+    """
+    ik_a: str          = Field(..., description="Base64 sender X25519 identity public key")
+    ek_a: str          = Field(..., description="Base64 sender X25519 ephemeral public key")
+    used_opk_pub: Optional[str] = Field(None, description="Base64 of the recipient OPK consumed by this handshake, or null")
+
+
 class SendMessageRequest(BaseModel):
     recipient_username: str
-    ciphertext: str    = Field(..., description="Base64-encoded AES-128-GCM ciphertext")
-    hpke_enc_blob: str = Field(..., description="Base64-encoded HPKE encapsulated key (RFC 9180 enc)")
+    ciphertext: str    = Field(..., description="Base64-encoded AEAD ciphertext")
     nonce: str         = Field(..., description="Base64-encoded AEAD nonce")
+    # hpke_enc_blob remains for legacy HPKE flows; Double Ratchet senders omit it.
+    hpke_enc_blob: Optional[str] = Field(None, description="Base64 HPKE encapsulated key (legacy HPKE flow only)")
+    # Double Ratchet header — required on Double Ratchet ciphertexts.
+    ratchet_pub: Optional[str]   = Field(None, description="Base64 sender DH ratchet public key")
+    pn: Optional[int]            = Field(None, description="Previous sending-chain length")
+    n: Optional[int]             = Field(None, description="Index within the current sending chain")
+    # First message of a new session carries the X3DH initiator header so the
+    # recipient can run x3dh_receive before decrypting.
+    x3dh_header: Optional[X3DHInitHeader] = None
 
 
 class SendMessageResponse(BaseModel):
@@ -35,9 +54,13 @@ class SendMessageResponse(BaseModel):
 class MessageResponse(BaseModel):
     id: str
     sender_username: str
-    ciphertext: str       # base64-encoded
-    hpke_enc_blob: str    # base64-encoded
-    nonce: str            # base64-encoded
+    ciphertext: str                       # base64-encoded
+    nonce: str                            # base64-encoded
+    hpke_enc_blob: Optional[str] = None   # base64-encoded; null for Double Ratchet messages
+    ratchet_pub: Optional[str]   = None
+    pn: Optional[int]            = None
+    n: Optional[int]             = None
+    x3dh_header: Optional[X3DHInitHeader] = None
     created_at: datetime
     blockchain_tx_hash: Optional[str]    = None
     blockchain_block_number: Optional[int] = None

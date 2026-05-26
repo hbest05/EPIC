@@ -1,98 +1,103 @@
 #pragma once
 
 /**
- * Client.hpp — Main application controller and top-level window.
+ * Client.hpp — REST controller for the SecureMsg backend.
  *
- * The Client class is the central coordinator. It owns:
- *   - The local User (identity + keypair)
- *   - The MessageStore (crypto + cache)
- *   - A map of known contacts (remote Users, public-key-only)
- *   - The HTTP session (libcurl) for talking to the FastAPI backend
- *   - The Qt main window UI
+ * Owns the libcurl handle, the session cookie jar, the CSRF token, and a
+ * pointer to the CryptoDaemonClient that handles all key material. The
+ * Qt windows (LoginWindow, MainWindow) talk to the backend only through
+ * this class so HTTP, JSON, and crypto-daemon concerns stay out of the
+ * UI layer.
  *
- * Qt signals emitted by the HTTP layer (or a polling timer) drive UI updates
- * without blocking the event loop.
+ * All HTTP calls go to a single fixed HTTPS base URL with peer + host
+ * verification on. The cookie jar plus the CSRF cookie installed by
+ * /auth/login give us the cookie+CSRF auth flow the backend requires.
  */
 
-#include <QMainWindow>
-#include <QTimer>
-#include <QMap>
+#include <QtCore/QByteArray>
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonObject>
+#include <QtCore/QList>
+#include <QtCore/QString>
 #include <memory>
+#include <string>
 
-#include "User.hpp"
-#include "MessageStore.hpp"
+class CryptoDaemonClient;
 
-class Client : public QMainWindow
+class Client
 {
-    Q_OBJECT
-
 public:
-    explicit Client(QWidget* parent = nullptr);
-    ~Client() override;
+    explicit Client(std::shared_ptr<CryptoDaemonClient> daemon);
+    ~Client();
+
+    Client(const Client&) = delete;
+    Client& operator=(const Client&) = delete;
+
+    /** One-time global init (libcurl, cookie jar path). Safe to call once. */
+    void initialize();
 
     // --- Auth ---
-    /**
-     * POST /api/auth/register — generate keypair, send registration request.
-     * TODO: Implement using libcurl (see httpPost helper).
-     */
-    void registerUser(const QString& username, const QString& email, const QString& password);
 
-    /**
-     * POST /api/auth/login — verify credentials, receive JWT, store in memory.
-     * TODO: Implement.
-     */
-    void login(const QString& username, const QString& password);
+    /** POST /auth/register. @returns empty string on success, error on failure. */
+    QString registerUser(const QString& username,
+                         const QString& email,
+                         const QString& password,
+                         const QByteArray& x25519PubKey,
+                         const QByteArray& ed25519PubKey);
 
+    /** POST /auth/login. On success: cookies are saved, CSRF token captured. */
+    QString login(const QString& username, const QString& password);
+
+    /** POST /auth/logout — best-effort; always clears local session state. */
     void logout();
 
-    // --- Contacts ---
-    /**
-     * GET /api/auth/user/{username}/pubkeys — fetch a contact's public keys.
-     * TODO: Implement and cache in m_contacts.
-     */
-    void fetchContactKeys(const QString& username);
+    /** POST /auth/prekeys — upload SPK + OPK batch. */
+    QString uploadPrekeys(const QByteArray& spkPub,
+                          const QByteArray& spkSig,
+                          const QList<QByteArray>& opks);
 
-    // --- Messaging ---
-    /**
-     * Encrypt and POST a message to /api/messages/send.
-     * TODO: Implement.
-     */
-    void sendMessage(const QString& recipientUsername, const QString& plaintext);
+    /** GET /auth/user/<username>/keybundle. */
+    QString fetchKeybundle(const QString& username, QJsonObject* out);
 
-    /**
-     * GET /api/messages/inbox — fetch new messages, decrypt, update UI.
-     * Called by m_pollTimer every N seconds.
-     * TODO: Implement.
-     */
-    void pollInbox();
+    // --- Messages ---
 
-private slots:
-    void onSendClicked();
-    void onLoginClicked();
-    void onRegisterClicked();
+    /** POST /messages/send with Double Ratchet header fields. */
+    QString sendMessage(const QString& recipient,
+                        const QByteArray& ciphertext,
+                        const QByteArray& nonce,
+                        const QByteArray& ratchetPub,
+                        int pn, int n,
+                        const QJsonObject* x3dhHeader);
+
+    /** GET /messages/inbox. */
+    QString fetchInbox(QJsonArray* out);
+
+    // --- Accessors ---
+    const QString& username()     const { return m_username; }
+    const QString& baseHostname() const { return m_baseHostname; }
+    bool isAuthenticated()        const { return !m_csrfToken.isEmpty(); }
+    CryptoDaemonClient* daemon()  const { return m_daemon.get(); }
 
 private:
-    // --- HTTP helpers using libcurl ---
-    /**
-     * Perform a blocking HTTP POST with JSON body.
-     * TODO: Move to async (QThread or libcurl multi-handle) to avoid blocking UI.
-     */
-    QByteArray httpPost(const QString& endpoint, const QByteArray& jsonBody);
-    QByteArray httpGet(const QString& endpoint);
+    /** Perform a libcurl HTTP request; returns response body on success.
+     *  Stores HTTP status in m_lastStatus and any libcurl error in
+     *  m_lastError. Adds the X-CSRF-Token header on POST/DELETE/PUT. */
+    QByteArray httpRequest(const QString& method,
+                           const QString& path,
+                           const QByteArray& jsonBody);
 
-    void setupUi();
-    void showAuthView();
-    void showChatView();
+    /** Pull the csrf_token cookie out of libcurl's cookie jar. */
+    void refreshCsrfToken();
 
-    // --- State ---
-    std::unique_ptr<User> m_localUser;
-    QMap<QString, std::shared_ptr<User>> m_contacts;
-    MessageStore* m_store;
-    QTimer* m_pollTimer;
+    QString m_baseUrl      = QStringLiteral("https://alpha-and-the-cryptmunks.theburkenator.com");
+    QString m_baseHostname = QStringLiteral("alpha-and-the-cryptmunks.theburkenator.com");
 
-    QString m_jwtToken;
-    QString m_activeRecipient;
+    std::shared_ptr<CryptoDaemonClient> m_daemon;
 
-    // TODO: Add Qt widget members (QListWidget, QTextEdit, etc.)
-    static constexpr const char* API_BASE = "http://localhost:8000/api";
+    QString m_username;
+    QString m_csrfToken;
+    std::string m_cookieJarPath;
+
+    long    m_lastStatus = 0;
+    QString m_lastError;
 };

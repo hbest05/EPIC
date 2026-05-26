@@ -12,9 +12,19 @@ find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 qt_standard_project_setup()
 
 # ---------------------------------------------------------------------------
+# OpenSSL — direct TLS handshake demo (separate from libcurl's TLS stack)
+# ---------------------------------------------------------------------------
+find_package(OpenSSL REQUIRED)
+
+# ---------------------------------------------------------------------------
 # libcurl — HTTP client for REST API calls
 # ---------------------------------------------------------------------------
 find_package(CURL REQUIRED)
+
+# ---------------------------------------------------------------------------
+# libsodium — cryptographic primitives (via vcpkg unofficial-sodium port)
+# ---------------------------------------------------------------------------
+find_package(unofficial-sodium CONFIG REQUIRED)
 
 # ---------------------------------------------------------------------------
 # Sources
@@ -25,6 +35,11 @@ set(SOURCES
     src/Message.cpp
     src/User.cpp
     src/MessageStore.cpp
+    src/CryptoDaemonClient.cpp
+    src/NetworkUtils.cpp
+    src/TLSVerifier.cpp
+    src/LoginWindow.cpp
+    src/MainWindow.cpp
 )
 
 set(HEADERS
@@ -32,6 +47,11 @@ set(HEADERS
     src/Message.hpp
     src/User.hpp
     src/MessageStore.hpp
+    src/CryptoDaemonClient.hpp
+    src/NetworkUtils.hpp
+    src/TLSVerifier.hpp
+    src/LoginWindow.hpp
+    src/MainWindow.hpp
 )
 
 qt_add_executable(SecureMsg ${SOURCES} ${HEADERS})
@@ -45,7 +65,14 @@ target_link_libraries(SecureMsg PRIVATE
     Qt6::Widgets
     Qt6::Network
     CURL::libcurl
+    unofficial-sodium::sodium
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
+
+if(WIN32)
+    target_link_libraries(SecureMsg PRIVATE Ws2_32 Crypt32)
+endif()
 
 # ---------------------------------------------------------------------------
 # Build type defaults

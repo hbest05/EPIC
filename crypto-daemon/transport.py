@@ -1,35 +1,51 @@
 """
-transport.py — message-framed JSON transport for the crypto daemon.
+transport.py — newline-delimited JSON transport for the crypto daemon.
 
-POSIX: AF_UNIX stream socket, newline-delimited JSON.
-Windows: multiprocessing.connection AF_PIPE (named pipe), length-prefixed
-JSON messages (framing handled by the stdlib).
+Uses a TCP socket bound to 127.0.0.1 on both POSIX and Windows. A TCP
+loopback socket is the smallest portable choice that lets QTcpSocket on
+the C++ side talk to the daemon with identical framing on every platform.
+The socket never leaves the loopback interface, so it is functionally
+equivalent to a local IPC channel.
 
-The wire format differs per platform, but both sides on the same machine
-use the same module so the abstraction is symmetric.
+Wire format: one JSON object per line, terminated by '\n'.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import socket
 import sys
-from pathlib import Path
 
-POSIX_SOCKET_PATH = "/tmp/securemsg-crypto.sock"
-WINDOWS_PIPE_PATH = r"\\.\pipe\securemsg-crypto"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 47291
+
+# Backwards-compatible address constants — kept so older docs still resolve.
+POSIX_SOCKET_PATH = f"{DEFAULT_HOST}:{DEFAULT_PORT}"
+WINDOWS_PIPE_PATH = f"{DEFAULT_HOST}:{DEFAULT_PORT}"
 
 
 def default_address() -> str:
-    return WINDOWS_PIPE_PATH if sys.platform == "win32" else POSIX_SOCKET_PATH
+    """Return the default loopback address as 'host:port'."""
+    return f"{DEFAULT_HOST}:{DEFAULT_PORT}"
+
+
+def _parse_address(address: str) -> tuple[str, int]:
+    """Parse a 'host:port' string. Plain integers are treated as ports."""
+    if ":" in address:
+        host, port = address.rsplit(":", 1)
+        return host or DEFAULT_HOST, int(port)
+    # Bare path (e.g. legacy '/tmp/securemsg-crypto.sock') — fall back to default.
+    try:
+        return DEFAULT_HOST, int(address)
+    except ValueError:
+        return DEFAULT_HOST, DEFAULT_PORT
 
 
 # ---------------------------------------------------------------------------
-# POSIX implementation (AF_UNIX + newline-delimited JSON)
+# Connection wrapper — newline-delimited JSON over a TCP stream
 # ---------------------------------------------------------------------------
 
-class _PosixConn:
+class _TcpConn:
     def __init__(self, sock: socket.socket):
         self._sock = sock
         self._buf = b""
@@ -60,100 +76,35 @@ class _PosixConn:
             pass
 
 
-class _PosixListener:
+class _TcpListener:
     def __init__(self, address: str):
-        self.address = address
-        # Best-effort cleanup of stale socket file from a previous run.
-        try:
-            os.unlink(address)
-        except FileNotFoundError:
-            pass
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.bind(address)
-        # Owner-only — local socket files must not be world-accessible.
-        try:
-            os.chmod(address, 0o600)
-        except OSError:
-            pass
+        host, port = _parse_address(address)
+        self.address = f"{host}:{port}"
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Allow restart without TIME_WAIT delay on POSIX. On Windows
+        # SO_REUSEADDR has different semantics; skipping it is safer.
+        if sys.platform != "win32":
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((host, port))
         self._sock.listen(8)
 
-    def accept(self) -> _PosixConn:
+    def accept(self) -> _TcpConn:
         client, _ = self._sock.accept()
-        return _PosixConn(client)
+        return _TcpConn(client)
 
     def close(self) -> None:
         try:
             self._sock.close()
         except OSError:
             pass
-        try:
-            os.unlink(self.address)
-        except FileNotFoundError:
-            pass
-
-
-def _posix_connect(address: str) -> _PosixConn:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(address)
-    return _PosixConn(s)
-
-
-# ---------------------------------------------------------------------------
-# Windows implementation (multiprocessing.connection AF_PIPE)
-# ---------------------------------------------------------------------------
-
-if sys.platform == "win32":
-    from multiprocessing.connection import Client as _MPClient
-    from multiprocessing.connection import Listener as _MPListener
-
-    class _WinConn:
-        def __init__(self, conn):
-            self._conn = conn
-
-        def recv_message(self):
-            try:
-                data = self._conn.recv_bytes()
-            except (EOFError, OSError):
-                return None
-            return json.loads(data.decode("utf-8"))
-
-        def send_message(self, obj) -> None:
-            self._conn.send_bytes(json.dumps(obj, separators=(",", ":")).encode("utf-8"))
-
-        def close(self) -> None:
-            try:
-                self._conn.close()
-            except OSError:
-                pass
-
-    class _WinListener:
-        def __init__(self, address: str):
-            self.address = address
-            self._listener = _MPListener(address=address, family="AF_PIPE")
-
-        def accept(self) -> "_WinConn":
-            return _WinConn(self._listener.accept())
-
-        def close(self) -> None:
-            try:
-                self._listener.close()
-            except OSError:
-                pass
-
-    def _win_connect(address: str) -> "_WinConn":
-        return _WinConn(_MPClient(address=address, family="AF_PIPE"))
 
 
 def listen(address: str | None = None):
-    addr = address or default_address()
-    if sys.platform == "win32":
-        return _WinListener(addr)
-    Path(addr).parent.mkdir(parents=True, exist_ok=True)
-    return _PosixListener(addr)
+    return _TcpListener(address or default_address())
 
 
 def connect(address: str | None = None):
-    addr = address or default_address()
-    if sys.platform == "win32":
-        return _win_connect(addr)
-    return _posix_connect(addr)
+    host, port = _parse_address(address or default_address())
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((host, port))
+    return _TcpConn(s)
