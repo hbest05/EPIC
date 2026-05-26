@@ -23,11 +23,13 @@ sys.path.insert(0, str(ROOT))
 import transport  # noqa: E402
 
 
+_PORT_COUNTER = [47300]
+
 def _addr_for(name: str) -> str:
-    suffix = f"{name}-{os.getpid()}"
-    if sys.platform == "win32":
-        return rf"\\.\pipe\securemsg-test-{suffix}"
-    return f"/tmp/securemsg-test-{suffix}.sock"
+    # Transport is now TCP/loopback on both platforms; hand out distinct
+    # ports per test daemon so Alice and Bob don't collide.
+    _PORT_COUNTER[0] += 1
+    return f"127.0.0.1:{_PORT_COUNTER[0]}"
 
 
 class DaemonProc:

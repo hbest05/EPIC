@@ -8,6 +8,7 @@ all 10 messages in one Ethereum transaction.
 """
 
 import base64
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -26,6 +27,7 @@ from app.schemas.message import (
     MessageResponse,
     SendMessageRequest,
     SendMessageResponse,
+    X3DHInitHeader,
 )
 from app.services.auth_service import get_current_user
 from app.services.blockchain_service import (
@@ -58,15 +60,40 @@ def _conversation_id(user_a_id, user_b_id) -> str:
 
 
 def _to_response(msg: Message, sender_username: str) -> MessageResponse:
-    """Convert a Message ORM object to a wire-safe MessageResponse."""
+    """Convert a Message ORM object to a wire-safe MessageResponse.
+
+    The `hpke_enc_blob` column is overloaded: under the legacy HPKE flow it
+    holds the RFC 9180 encapsulated key; under the Double Ratchet flow it
+    holds a UTF-8 JSON serialisation of the X3DHInitHeader (or empty bytes
+    after the first message in the session). We disambiguate by trying to
+    parse JSON first.
+    """
     tx_hash   = msg.blockchain_tx_hash
     etherscan = f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+
+    hpke_enc_b64: Optional[str] = None
+    x3dh_hdr: Optional[X3DHInitHeader] = None
+    raw = msg.hpke_enc_blob or b""
+    if raw:
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+            if isinstance(obj, dict) and "ik_a" in obj and "ek_a" in obj:
+                x3dh_hdr = X3DHInitHeader(**obj)
+            else:
+                hpke_enc_b64 = base64.b64encode(raw).decode()
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            hpke_enc_b64 = base64.b64encode(raw).decode()
+
     return MessageResponse(
         id=str(msg.id),
         sender_username=sender_username,
         ciphertext=base64.b64encode(msg.ciphertext).decode(),
-        hpke_enc_blob=base64.b64encode(msg.hpke_enc_blob).decode(),
         nonce=base64.b64encode(msg.nonce).decode(),
+        hpke_enc_blob=hpke_enc_b64,
+        ratchet_pub=msg.ratchet_public_key,
+        pn=msg.previous_chain_length,
+        n=msg.message_index,
+        x3dh_header=x3dh_hdr,
         created_at=msg.created_at,
         blockchain_tx_hash=tx_hash,
         blockchain_block_number=msg.blockchain_block_number,
@@ -131,14 +158,32 @@ async def send_message(
 
     # Validate and decode ciphertext blobs
     try:
-        ciphertext_bytes    = base64.b64decode(body.ciphertext, validate=True)
-        hpke_enc_blob_bytes = base64.b64decode(body.hpke_enc_blob, validate=True)
-        nonce_bytes         = base64.b64decode(body.nonce, validate=True)
+        ciphertext_bytes = base64.b64decode(body.ciphertext, validate=True)
+        nonce_bytes      = base64.b64decode(body.nonce, validate=True)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="ciphertext, hpke_enc_blob, and nonce must be valid base64",
+            detail="ciphertext and nonce must be valid base64",
         )
+
+    # Decide what to store in the (NOT NULL) hpke_enc_blob column.
+    #   1. Double Ratchet first-message: serialise the X3DH initiator header.
+    #   2. Double Ratchet follow-up:     empty bytes.
+    #   3. Legacy HPKE:                  decoded HPKE encapsulated key.
+    if body.x3dh_header is not None:
+        hpke_enc_blob_bytes = json.dumps(
+            body.x3dh_header.model_dump(), separators=(",", ":")
+        ).encode("utf-8")
+    elif body.hpke_enc_blob:
+        try:
+            hpke_enc_blob_bytes = base64.b64decode(body.hpke_enc_blob, validate=True)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="hpke_enc_blob must be valid base64",
+            )
+    else:
+        hpke_enc_blob_bytes = b""
 
     # Persist message — get_db() commits on success
     msg = Message(
@@ -147,6 +192,9 @@ async def send_message(
         ciphertext=ciphertext_bytes,
         hpke_enc_blob=hpke_enc_blob_bytes,
         nonce=nonce_bytes,
+        ratchet_public_key=body.ratchet_pub,
+        previous_chain_length=body.pn,
+        message_index=body.n,
     )
     db.add(msg)
     await db.flush()  # populate msg.id before the task captures it
