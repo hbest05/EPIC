@@ -10,7 +10,7 @@ Four tables live here:
 
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -69,7 +69,7 @@ class OneTimePrekey(Base):
         nullable=False,
         index=True,
     )
-    key_id = Column(Integer, nullable=False)
+    key_id = Column(BigInteger, nullable=False)
     public_key = Column(String(512), nullable=False)   # base64 X25519 public key
     used = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
