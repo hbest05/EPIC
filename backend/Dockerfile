@@ -28,6 +28,8 @@ COPY backend/ .
 # blockchain_service.py checks /abi/MessageDigestRegistryABI.json first.
 COPY blockchain/MessageDigestRegistryABI.json /abi/MessageDigestRegistryABI.json
 
+COPY frontend/ /app/frontend/
+
 # Run as a non-root user — if an RCE occurs the attacker does not get UID 0.
 RUN useradd -u 1001 -m appuser \
     && chown -R appuser /app /abi

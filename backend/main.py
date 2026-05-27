@@ -10,6 +10,7 @@ Responsibilities:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -38,10 +39,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Execution order on response: route handler  → CORS → CSRF → SecurityHeaders
 app.add_middleware(CSRFMiddleware)
 
-# TODO: Restrict origins to the deployed frontend URL in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,6 +62,11 @@ app.include_router(blockchain.router,               prefix="/api/blockchain",   
 app.include_router(blockchain.verify_router,        prefix="/api/verify",        tags=["verify"])
 # Tier 3: conversation close endpoint
 app.include_router(blockchain.conversations_router, prefix="/api/conversations", tags=["conversations"])
+# Public verify — no auth required, used by the standalone verify.html page
+app.include_router(blockchain.public_router,        prefix="/public/verify",     tags=["verify-public"])
+
+
+app.mount("/static", StaticFiles(directory="/app/frontend"), name="static")
 
 
 @app.on_event("startup")
