@@ -16,6 +16,8 @@
 #include <QtCore/QFile>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QStandardPaths>
+#include <QtCore/QStringList>
+#include <QtCore/QUrl>
 #include <QtCore/QUuid>
 
 #include <curl/curl.h>
@@ -304,14 +306,59 @@ QString Client::sendMessage(const QString& recipient,
         QStringLiteral("send failed (HTTP %1)").arg(m_lastStatus));
 }
 
-QString Client::fetchInbox(QJsonArray* out)
+namespace {
+
+QString buildMessagesQuery(int limit,
+                           const QString& before,
+                           const QString& after,
+                           const QString& withUser)
 {
+    QStringList parts;
+    parts << QStringLiteral("limit=%1").arg(limit);
+    if (!before.isEmpty())
+        parts << QStringLiteral("before=%1").arg(QString::fromUtf8(
+            QUrl::toPercentEncoding(before)));
+    if (!after.isEmpty())
+        parts << QStringLiteral("after=%1").arg(QString::fromUtf8(
+            QUrl::toPercentEncoding(after)));
+    if (!withUser.isEmpty())
+        parts << QStringLiteral("with_user=%1").arg(QString::fromUtf8(
+            QUrl::toPercentEncoding(withUser)));
+    return parts.isEmpty() ? QString() : QStringLiteral("?") + parts.join('&');
+}
+
+} // namespace
+
+QString Client::fetchInbox(QJsonArray* out,
+                           int limit,
+                           const QString& before,
+                           const QString& after,
+                           const QString& withUser)
+{
+    const QString query = buildMessagesQuery(limit, before, after, withUser);
     const QByteArray resp = httpRequest(QStringLiteral("GET"),
-                                        QStringLiteral("/api/messages/inbox"),
+                                        QStringLiteral("/api/messages/inbox") + query,
                                         {});
     if (m_lastStatus != 200) {
         if (!m_lastError.isEmpty()) return m_lastError;
         return QStringLiteral("inbox fetch failed (HTTP %1)").arg(m_lastStatus);
+    }
+    if (out) *out = QJsonDocument::fromJson(resp).array();
+    return {};
+}
+
+QString Client::fetchSent(QJsonArray* out,
+                          int limit,
+                          const QString& before,
+                          const QString& withUser)
+{
+    const QString query = buildMessagesQuery(limit, before, QString(), withUser);
+    const QByteArray resp = httpRequest(QStringLiteral("GET"),
+                                        QStringLiteral("/api/messages/sent") + query,
+                                        {});
+    if (m_lastStatus != 200) {
+        if (!m_lastError.isEmpty()) return m_lastError;
+        return QStringLiteral("sent fetch failed (HTTP %1)").arg(m_lastStatus);
     }
     if (out) *out = QJsonDocument::fromJson(resp).array();
     return {};

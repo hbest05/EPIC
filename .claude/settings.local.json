@@ -25,7 +25,9 @@
       "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\), f\\) for f in \\('handlers.py','session_store.py','x3dh.py'\\)]; print\\('OK'\\)\")",
       "Bash(cmake --build __TRACKED_VAR__/EPIC/client-cpp/build)",
       "Bash(tasklist)",
-      "Bash(cmake --build __TRACKED_VAR__/EPIC/client-cpp/build-47292)"
+      "Bash(cmake --build __TRACKED_VAR__/EPIC/client-cpp/build-47292)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('crypto-daemon/handlers.py'\\).read\\(\\)\\); ast.parse\\(open\\('backend/app/routers/messages.py'\\).read\\(\\)\\); ast.parse\\(open\\('backend/app/schemas/message.py'\\).read\\(\\)\\); print\\('OK: all three parse'\\)\")",
+      "Bash(python -m pytest test_daemon.py -q)"
     ]
   }
 }

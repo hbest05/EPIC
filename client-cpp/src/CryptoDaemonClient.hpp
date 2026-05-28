@@ -139,6 +139,14 @@ public:
         QByteArray signPub;          ///< Ed25519 signing public key
     };
 
+    /** One restored Double Ratchet session, as reported by list_sessions. */
+    struct SessionInfo
+    {
+        QString sessionId;
+        QString peerUserId;       ///< Peer username this session talks to
+        QString role;             ///< "initiator" or "responder"
+    };
+
     // --- Identity ---
 
     /** Generate a fresh identity (X25519 IK + Ed25519 signing key). */
@@ -146,6 +154,10 @@ public:
 
     /** Decrypt the on-disk identity file and load any saved sessions. */
     Identity loadIdentity(const QString& passphrase);
+
+    /** List the sessions restored by loadIdentity so the UI can rebuild its
+     *  peer-username -> session-id map across restarts. */
+    QList<SessionInfo> listSessions();
 
     // --- Prekeys ---
 

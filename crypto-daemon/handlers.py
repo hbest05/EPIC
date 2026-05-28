@@ -335,6 +335,23 @@ def op_decrypt_message(state: DaemonState, params: dict) -> dict:
     return {"plaintext": pt}
 
 
+def op_list_sessions(state: DaemonState, params: dict) -> dict:
+    """Return the restored sessions so the client can rebuild its
+    peer-username -> session-id map after a restart. No key material is
+    exposed — only the session id, peer user id, and role."""
+    state.require_identity()
+    return {
+        "sessions": [
+            {
+                "session_id": s.session_id,
+                "peer_user_id": s.peer_user_id,
+                "role": s.role,
+            }
+            for s in state.sessions.values()
+        ]
+    }
+
+
 def op_dh_ratchet_step(state: DaemonState, params: dict) -> dict:
     ident = state.require_identity()
     sid = _require_str(params, "session_id")
@@ -359,4 +376,5 @@ OPS: Dict[str, Callable[[DaemonState, dict], dict]] = {
     "encrypt_message": op_encrypt_message,
     "decrypt_message": op_decrypt_message,
     "dh_ratchet_step": op_dh_ratchet_step,
+    "list_sessions": op_list_sessions,
 }

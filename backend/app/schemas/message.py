@@ -54,6 +54,7 @@ class SendMessageResponse(BaseModel):
 class MessageResponse(BaseModel):
     id: str
     sender_username: str
+    recipient_username: Optional[str] = None  # populated by /sent so the client can thread by peer
     ciphertext: str                       # base64-encoded
     nonce: str                            # base64-encoded
     hpke_enc_blob: Optional[str] = None   # base64-encoded; null for Double Ratchet messages

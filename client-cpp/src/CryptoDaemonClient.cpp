@@ -139,6 +139,23 @@ CryptoDaemonClient::Identity CryptoDaemonClient::loadIdentity(const QString& pas
     return id;
 }
 
+QList<CryptoDaemonClient::SessionInfo> CryptoDaemonClient::listSessions()
+{
+    const QJsonObject data = call(QStringLiteral("list_sessions"), QJsonObject{});
+    QList<SessionInfo> out;
+    const QJsonArray arr = data.value(QStringLiteral("sessions")).toArray();
+    out.reserve(arr.size());
+    for (const QJsonValue& v : arr) {
+        const QJsonObject o = v.toObject();
+        SessionInfo info;
+        info.sessionId  = o.value(QStringLiteral("session_id")).toString();
+        info.peerUserId = o.value(QStringLiteral("peer_user_id")).toString();
+        info.role       = o.value(QStringLiteral("role")).toString();
+        out.append(info);
+    }
+    return out;
+}
+
 PrekeyBundle CryptoDaemonClient::generatePrekeys(const QByteArray& signPub)
 {
     QJsonObject params;
