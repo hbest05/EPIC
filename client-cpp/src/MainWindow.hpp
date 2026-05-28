@@ -5,8 +5,10 @@
  *
  * Layout: contact list on the left, message thread on the right with a
  * compose box at the bottom, top bar showing server hostname / username
- * / TLS indicator. A 5-second QTimer polls /messages/inbox; new messages
- * are pushed through the crypto daemon's decrypt path before display.
+ * / TLS indicator. Inbound messages arrive in real time over a QWebSocket
+ * to /ws; each is pushed through the crypto daemon's decrypt path before
+ * display. pollInbox() runs once on login (and on each reconnect) as a
+ * fallback to catch messages that arrived while offline.
  */
 
 #include <QtCore/QHash>
@@ -15,6 +17,7 @@
 #include <QtWidgets/QMainWindow>
 
 class Client;
+class QJsonObject;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -22,6 +25,7 @@ class QListWidgetItem;
 class QPushButton;
 class QTextEdit;
 class QTimer;
+class QWebSocket;
 
 class MainWindow : public QMainWindow
 {
@@ -40,6 +44,11 @@ private slots:
     void onContactSelected(QListWidgetItem* item);
     void onLoadOlderClicked();
     void pollInbox();
+
+    // --- Real-time delivery socket ---
+    void onWsConnected();
+    void onWsDisconnected();
+    void onWsTextMessage(const QString& text);
 
 private:
     /** One displayed message in a conversation thread. Persisted to the local
@@ -76,13 +85,30 @@ private:
      *  persisted sessions after login. */
     void restoreSessions();
 
+    /** Decrypt and append a single inbound message object (the shape returned
+     *  by /messages/inbox and pushed over the WebSocket). Handles dedupe,
+     *  x3dh_receive on a new session, and Double Ratchet decrypt.
+     *  @returns true if a new message was appended. */
+    bool processInboundMessage(const QJsonObject& m, bool persist);
+
+    /** Open (or reopen) the QWebSocket to /ws, authenticating with the
+     *  access_token cookie. */
+    void connectWebSocket();
+
+    /** Arm the reconnect timer using the current exponential backoff delay,
+     *  then double the delay up to the 30s ceiling. */
+    void scheduleReconnect();
+
     /** Local plaintext history cache (per logged-in user). */
     QString historyFilePath() const;
     void    loadHistory();
     void    saveHistory() const;
 
     Client*  m_client;                 // not owned
-    QTimer*  m_pollTimer;
+
+    QWebSocket* m_webSocket;
+    QTimer*     m_reconnectTimer;       // single-shot; fires connectWebSocket()
+    int         m_reconnectDelayMs;     // current backoff delay, capped at kMaxReconnectMs
 
     QListWidget* m_contactList;
     QTextEdit*   m_thread;
@@ -111,4 +137,9 @@ private:
     QString m_lastInboxId;
 
     static constexpr int kPageSize = 30;
+
+    /** WebSocket reconnect backoff bounds: start at 1s, double each failed
+     *  attempt, cap at 30s. */
+    static constexpr int kInitialReconnectMs = 1000;
+    static constexpr int kMaxReconnectMs     = 30000;
 };

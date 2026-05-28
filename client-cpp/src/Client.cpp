@@ -161,6 +161,33 @@ void Client::refreshCsrfToken()
     }
 }
 
+QString Client::accessTokenCookie() const
+{
+    if (m_cookieJarPath.empty()) return {};
+
+    QFile f(QString::fromStdString(m_cookieJarPath));
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
+
+    while (!f.atEnd()) {
+        QByteArray line = f.readLine();
+        // libcurl writes httpOnly cookies (like access_token) with a
+        // "#HttpOnly_" prefix on the domain column. Strip it so the line parses
+        // like any other; genuine comment/blank lines are still skipped.
+        if (line.startsWith("#HttpOnly_")) {
+            line = line.mid(static_cast<int>(qstrlen("#HttpOnly_")));
+        } else if (line.startsWith('#') || line.trimmed().isEmpty()) {
+            continue;
+        }
+        // Netscape cookie format: domain flag path secure expires name value
+        const QList<QByteArray> cols = line.split('\t');
+        if (cols.size() < 7) continue;
+        if (cols[5].trimmed() == "access_token") {
+            return QString::fromUtf8(cols[6]).trimmed();
+        }
+    }
+    return {};
+}
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------

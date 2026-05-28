@@ -15,6 +15,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +38,7 @@ from app.services.blockchain_service import (
     push_to_batch,
     record_event_triggered_digest,
 )
+from app.services.ws_manager import manager
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +205,28 @@ async def send_message(
     )
     db.add(msg)
     await db.flush()  # populate msg.id before the task captures it
+
+    # Real-time delivery: push the full message to the recipient's WebSocket if
+    # connected. Scheduled as a BackgroundTask so it fires after get_db() commits
+    # the INSERT — the payload is self-contained, so the recipient never needs to
+    # refetch and there's no read-before-commit race.
+    #
+    # Best-effort only: building the payload (db.refresh to load the
+    # server-default created_at, MessageResponse serialisation) runs in the
+    # request path, so any failure here MUST NOT abort the send. The message is
+    # already persisted; a missed push just means the recipient picks it up on
+    # their next poll/reconnect. Mirrors the blockchain task's never-raise rule.
+    try:
+        await db.refresh(msg)  # load created_at (server_default func.now())
+        push_payload = {
+            "type": "new_message",
+            "message": jsonable_encoder(
+                _to_response(msg, current_user.username, recipient.username)
+            ),
+        }
+        background_tasks.add_task(manager.send_to_user, str(recipient.id), push_payload)
+    except Exception as exc:
+        logger.error("ws push scheduling failed for message %s: %s", msg.id, exc)
 
     conv_id      = _conversation_id(current_user.id, recipient.id)
     timestamp    = datetime.now(timezone.utc).isoformat()

@@ -16,7 +16,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.middleware.csrf import CSRFMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
-from app.routers import auth, messages, blockchain
+from app.routers import auth, messages, blockchain, ws
 from app.database import engine
 from app.services.rate_limit import limiter
 from app.services.redis_service import init_redis, close_redis
@@ -62,6 +62,8 @@ app.include_router(blockchain.router,               prefix="/api/blockchain",   
 app.include_router(blockchain.verify_router,        prefix="/api/verify",        tags=["verify"])
 # Tier 3: conversation close endpoint
 app.include_router(blockchain.conversations_router, prefix="/api/conversations", tags=["conversations"])
+# Real-time delivery socket — mounted at the root so the client connects to /ws.
+app.include_router(ws.router, tags=["ws"])
 # Public verify — no auth required, used by the standalone verify.html page
 app.include_router(blockchain.public_router,        prefix="/public/verify",     tags=["verify-public"])
 

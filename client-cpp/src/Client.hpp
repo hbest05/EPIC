@@ -92,6 +92,13 @@ public:
     bool isAuthenticated()        const { return !m_csrfToken.isEmpty(); }
     CryptoDaemonClient* daemon()  const { return m_daemon.get(); }
 
+    /** wss:// URL of the real-time delivery socket on the same host as the API. */
+    QString websocketUrl() const { return QStringLiteral("wss://") + m_baseHostname + QStringLiteral("/ws"); }
+
+    /** Value of the httpOnly access_token cookie from libcurl's jar, used to
+     *  authenticate the WebSocket handshake. Empty if not logged in. */
+    QString accessTokenCookie() const;
+
 private:
     /** Perform a libcurl HTTP request; returns response body on success.
      *  Stores HTTP status in m_lastStatus and any libcurl error in
