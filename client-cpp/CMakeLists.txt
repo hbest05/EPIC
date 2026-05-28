@@ -13,7 +13,7 @@ set(DAEMON_PORT 47291 CACHE STRING "TCP port for the local crypto daemon (defaul
 # Qt6 — UI framework
 # Set Qt6_DIR if Qt is not on PATH: cmake -DQt6_DIR=/path/to/qt/lib/cmake/Qt6
 # ---------------------------------------------------------------------------
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets)
 qt_standard_project_setup()
 
 # ---------------------------------------------------------------------------
@@ -73,6 +73,7 @@ target_link_libraries(SecureMsg PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::Network
+    Qt6::WebSockets
     CURL::libcurl
     unofficial-sodium::sodium
     OpenSSL::SSL

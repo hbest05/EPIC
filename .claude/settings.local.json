@@ -27,7 +27,24 @@
       "Bash(tasklist)",
       "Bash(cmake --build __TRACKED_VAR__/EPIC/client-cpp/build-47292)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('crypto-daemon/handlers.py'\\).read\\(\\)\\); ast.parse\\(open\\('backend/app/routers/messages.py'\\).read\\(\\)\\); ast.parse\\(open\\('backend/app/schemas/message.py'\\).read\\(\\)\\); print\\('OK: all three parse'\\)\")",
-      "Bash(python -m pytest test_daemon.py -q)"
+      "Bash(python -m pytest test_daemon.py -q)",
+      "Bash(ls /c/Qt/6.11.1/mingw_64/lib/cmake/ | grep -i websocket; echo \"---libs---\"; ls /c/Qt/6.11.1/mingw_64/lib/ | grep -i websocket; echo \"---dll---\"; ls /c/Qt/6.11.1/mingw_64/bin/ | grep -i websocket)",
+      "Read(//c/Qt/6.11.1/mingw_64/lib/cmake//**)",
+      "Read(//c/Qt/6.11.1/mingw_64/lib//**)",
+      "Read(//c/Qt/6.11.1/mingw_64/bin//**)",
+      "Read(//c/Qt//**)",
+      "Read(//c/Qt/**)",
+      "Bash(cd /c/Users/m4tth/EPIC/backend && grep -iE \"websockets|wsproto|uvicorn\" requirements.txt)",
+      "Read(//c/c/Users/m4tth/EPIC/backend/**)",
+      "Bash(ls -d build*/)",
+      "Bash(ls /c/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsConfig.cmake)",
+      "Bash(cmake .)",
+      "Bash(ninja)",
+      "Bash(cd /c/Users/m4tth/EPIC/client-cpp/build-47292 && grep -E \"CMAKE_CXX_COMPILER:|CMAKE_GENERATOR:\" CMakeCache.txt)",
+      "Read(//c/c/Users/m4tth/EPIC/client-cpp/build-47292/**)",
+      "Bash(cmake -G Ninja -DCMAKE_CXX_COMPILER=C:/mingw64/bin/c++.exe -DCMAKE_PREFIX_PATH=C:/Qt/6.11.1/mingw_64 -B b)",
+      "Bash(cmake --build b)",
+      "Bash(python -m py_compile app/routers/messages.py)"
     ]
   }
 }

@@ -350,6 +350,15 @@ SecureMsg_autogen/timestamp: \
 	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6Network/Qt6QTlsBackendOpenSSLPluginTargets-relwithdebinfo.cmake \
 	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6Network/Qt6QTlsBackendOpenSSLPluginTargets.cmake \
 	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6Network/Qt6QTlsBackendOpenSSLPluginTargetsPrecheck.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsAdditionalTargetInfo.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsConfig.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsConfigVersion.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsConfigVersionImpl.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsDependencies.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsTargets-relwithdebinfo.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsTargets.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsTargetsPrecheck.cmake \
+	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6WebSockets/Qt6WebSocketsVersionlessAliasTargets.cmake \
 	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6Widgets/Qt6QModernWindowsStylePluginAdditionalTargetInfo.cmake \
 	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6Widgets/Qt6QModernWindowsStylePluginConfig.cmake \
 	C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6Widgets/Qt6QModernWindowsStylePluginTargets-relwithdebinfo.cmake \
@@ -614,87 +623,24 @@ SecureMsg_autogen/timestamp: \
 	C:/mingw64/lib/gcc/x86_64-w64-mingw32/15.2.0/include/stddef.h \
 	C:/mingw64/lib/gcc/x86_64-w64-mingw32/15.2.0/include/stdint.h \
 	C:/mingw64/lib/gcc/x86_64-w64-mingw32/15.2.0/include/syslimits.h \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeCXXCompiler.cmake.in \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeCXXCompilerABI.cpp \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeCXXInformation.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeCheckCompilerFlagCommonPatterns.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeCommonLanguageInclude.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeCompilerIdDetection.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeDependentOption.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeDetermineCXXCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeDetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeDetermineCompilerABI.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeDetermineCompilerId.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeDetermineCompilerSupport.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeDetermineRCCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeDetermineSystem.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeFindBinUtils.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeFindDependencyMacro.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeGenericSystem.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeInitializeConfigs.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeLanguageInformation.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeNinjaFindMake.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeParseImplicitIncludeInfo.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeParseImplicitLinkInfo.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeParseLibraryArchitecture.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeRCCompiler.cmake.in \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeRCInformation.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeSystem.cmake.in \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CMakeSystemSpecificInitialize.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeTestCXXCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeTestCompilerCommon.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/CMakeTestRCCompiler.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CheckCXXCompilerFlag.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CheckCXXSourceCompiles.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CheckIncludeFileCXX.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/CheckLibraryExists.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/ADSP-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/ARMCC-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/ARMClang-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/AppleClang-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Borland-DetermineCompiler.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Compiler/CMakeCommonCompilerMacros.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Clang-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Clang-DetermineCompilerInternal.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Cray-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/CrayClang-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Diab-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Embarcadero-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Fujitsu-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/GHS-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/GNU-CXX-CXXImportStd.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Compiler/GNU-CXX.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/GNU-FindBinUtils.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Compiler/GNU.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/HP-CXX-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/IAR-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Intel-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/MSVC-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/NVHPC-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/NVIDIA-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/OrangeC-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/PGI-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/PathScale-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Renesas-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/SCO-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/TI-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/TIClang-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Tasking-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/Watcom-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/XL-CXX-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/FindOpenSSL.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/FindPackageHandleStandardArgs.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/FindPackageMessage.cmake \
@@ -704,17 +650,13 @@ SecureMsg_autogen/timestamp: \
 	C:/mingw64/share/cmake-4.2/Modules/GNUInstallDirs.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Internal/CMakeCXXLinkerInformation.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Internal/CMakeCommonLinkerInformation.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Internal/CMakeDetermineLinkerId.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Internal/CMakeInspectCXXLinker.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Internal/CheckCompilerFlag.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Internal/CheckFlagCommonConfig.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Internal/CheckSourceCompiles.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Internal/FeatureTesting.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Platform/Linker/GNU.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Platform/Linker/Windows-CXX.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Platform/Linker/Windows-GNU-CXX.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Platform/Linker/Windows-GNU.cmake \
-	C:/mingw64/share/cmake-4.2/Modules/Platform/Windows-Determine-CXX.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Platform/Windows-GNU-CXX-ABI.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Platform/Windows-GNU-CXX.cmake \
 	C:/mingw64/share/cmake-4.2/Modules/Platform/Windows-GNU.cmake \

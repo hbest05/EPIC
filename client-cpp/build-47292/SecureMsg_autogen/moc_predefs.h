@@ -374,6 +374,7 @@
 #define __UINT_FAST64_TYPE__ long long unsigned int
 #define __cpp_constexpr_in_decltype 201711L
 #define __cpp_inline_variables 201606L
+#define QT_WEBSOCKETS_LIB 1
 #define __BFLT16_MIN_EXP__ (-125)
 #define __INT_MAX__ 0x7fffffff
 #define WIN32 1

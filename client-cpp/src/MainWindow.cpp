@@ -26,7 +26,12 @@
 #include <QtCore/QJsonObject>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTimer>
+#include <QtCore/QUrl>
+#include <QtCore/QUrlQuery>
 #include <QtCore/QUuid>
+#include <QtNetwork/QAbstractSocket>
+#include <QtNetwork/QNetworkRequest>
+#include <QtWebSockets/QWebSocket>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
@@ -56,7 +61,9 @@ QString nowIso()
 MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     : QMainWindow(parent)
     , m_client(client)
-    , m_pollTimer(new QTimer(this))
+    , m_webSocket(new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this))
+    , m_reconnectTimer(new QTimer(this))
+    , m_reconnectDelayMs(kInitialReconnectMs)
     , m_contactList(new QListWidget(this))
     , m_thread(new QTextEdit(this))
     , m_compose(new QLineEdit(this))
@@ -107,16 +114,25 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     connect(m_addContactButton, &QPushButton::clicked,         this, &MainWindow::onAddContactClicked);
     connect(m_loadOlderButton,  &QPushButton::clicked,         this, &MainWindow::onLoadOlderClicked);
     connect(m_contactList,      &QListWidget::itemClicked,     this, &MainWindow::onContactSelected);
-    connect(m_pollTimer,        &QTimer::timeout,              this, &MainWindow::pollInbox);
+
+    // Real-time delivery socket wiring.
+    m_reconnectTimer->setSingleShot(true);
+    connect(m_reconnectTimer, &QTimer::timeout,            this, &MainWindow::connectWebSocket);
+    connect(m_webSocket, &QWebSocket::connected,           this, &MainWindow::onWsConnected);
+    connect(m_webSocket, &QWebSocket::disconnected,        this, &MainWindow::onWsDisconnected);
+    connect(m_webSocket, &QWebSocket::textMessageReceived, this, &MainWindow::onWsTextMessage);
+    connect(m_webSocket, &QWebSocket::errorOccurred,
+            this, [this](QAbstractSocket::SocketError) { scheduleReconnect(); });
 
     // Rebuild local thread history and the username -> session map before we
-    // start polling, so restored conversations show immediately on login.
+    // open the socket, so restored conversations show immediately on login.
     loadHistory();
     restoreSessions();
 
-    m_pollTimer->start(5000);
-    // Pull anything that arrived while we were offline straight away.
+    // Pull anything that arrived while we were offline straight away — this is
+    // the one-shot fallback that the real-time socket complements.
     QTimer::singleShot(0, this, &MainWindow::pollInbox);
+    connectWebSocket();
 
     // Replenish OPK pool on startup — Bobs who run out can't receive new
     // sessions. Skip right after registration: that flow already uploaded a
@@ -465,57 +481,131 @@ void MainWindow::pollInbox()
 
     bool changed = false;
     for (const QJsonObject& m : ordered) {
-        const QString id = m.value(QStringLiteral("id")).toString();
-        if (m_seenMessageIds.contains(id)) continue;
-        m_seenMessageIds.insert(id);
-
-        const QString sender = m.value(QStringLiteral("sender_username")).toString();
-
-        QString sessionId = m_sessions.value(sender);
-        try {
-            const QJsonValue hdrVal = m.value(QStringLiteral("x3dh_header"));
-            if (hdrVal.isObject() && sessionId.isEmpty()) {
-                const QJsonObject h = hdrVal.toObject();
-                X3dhInboundHeader hdr;
-                hdr.ikA = b64dec(h.value(QStringLiteral("ik_a")));
-                hdr.ekA = b64dec(h.value(QStringLiteral("ek_a")));
-                const QJsonValue opk = h.value(QStringLiteral("used_opk_pub"));
-                if (opk.isString()) hdr.usedOpkPub = b64dec(opk);
-                sessionId = m_client->daemon()->x3dhReceive(sender, hdr);
-                m_sessions.insert(sender, sessionId);
-                ensureContact(sender);
-            }
-            if (sessionId.isEmpty()) {
-                // Subsequent message but we have no session — skip quietly.
-                continue;
-            }
-
-            EncryptedMessageFields f;
-            f.ciphertext = b64dec(m.value(QStringLiteral("ciphertext")));
-            f.nonce      = b64dec(m.value(QStringLiteral("nonce")));
-            f.ratchetPub = b64dec(m.value(QStringLiteral("ratchet_pub")));
-            f.pn         = m.value(QStringLiteral("pn")).toInt();
-            f.n          = m.value(QStringLiteral("n")).toInt();
-
-            const QString plaintext = m_client->daemon()->decryptMessage(sessionId, f);
-
-            ThreadMessage tm;
-            tm.id     = id;
-            tm.fromMe = false;
-            tm.sender = sender;
-            tm.text   = plaintext;
-            tm.ts     = m.value(QStringLiteral("created_at")).toString(nowIso());
-            // Persist once at the end of the batch instead of per message.
-            appendMessage(sender, tm, /*persist=*/false);
-            changed = true;
-        } catch (const CryptoDaemonError& e) {
-            if (sender == m_activeContact) {
-                m_thread->append(tr("[%1] decrypt failed: %2").arg(sender, e.message()));
-            }
-        }
+        // Persist once at the end of the batch instead of per message.
+        if (processInboundMessage(m, /*persist=*/false)) changed = true;
     }
 
     if (!newestId.isEmpty()) m_lastInboxId = newestId;
     saveHistory();
     if (changed) renderActiveThread();
+}
+
+bool MainWindow::processInboundMessage(const QJsonObject& m, bool persist)
+{
+    const QString id = m.value(QStringLiteral("id")).toString();
+    if (id.isEmpty() || m_seenMessageIds.contains(id)) return false;
+    m_seenMessageIds.insert(id);
+
+    const QString sender = m.value(QStringLiteral("sender_username")).toString();
+
+    QString sessionId = m_sessions.value(sender);
+    try {
+        const QJsonValue hdrVal = m.value(QStringLiteral("x3dh_header"));
+        if (hdrVal.isObject() && sessionId.isEmpty()) {
+            const QJsonObject h = hdrVal.toObject();
+            X3dhInboundHeader hdr;
+            hdr.ikA = b64dec(h.value(QStringLiteral("ik_a")));
+            hdr.ekA = b64dec(h.value(QStringLiteral("ek_a")));
+            const QJsonValue opk = h.value(QStringLiteral("used_opk_pub"));
+            if (opk.isString()) hdr.usedOpkPub = b64dec(opk);
+            sessionId = m_client->daemon()->x3dhReceive(sender, hdr);
+            m_sessions.insert(sender, sessionId);
+            ensureContact(sender);
+        }
+        if (sessionId.isEmpty()) {
+            // Subsequent message but we have no session — skip quietly.
+            return false;
+        }
+
+        EncryptedMessageFields f;
+        f.ciphertext = b64dec(m.value(QStringLiteral("ciphertext")));
+        f.nonce      = b64dec(m.value(QStringLiteral("nonce")));
+        f.ratchetPub = b64dec(m.value(QStringLiteral("ratchet_pub")));
+        f.pn         = m.value(QStringLiteral("pn")).toInt();
+        f.n          = m.value(QStringLiteral("n")).toInt();
+
+        const QString plaintext = m_client->daemon()->decryptMessage(sessionId, f);
+
+        ThreadMessage tm;
+        tm.id     = id;
+        tm.fromMe = false;
+        tm.sender = sender;
+        tm.text   = plaintext;
+        tm.ts     = m.value(QStringLiteral("created_at")).toString(nowIso());
+        appendMessage(sender, tm, persist);
+        return true;
+    } catch (const CryptoDaemonError& e) {
+        if (sender == m_activeContact) {
+            m_thread->append(tr("[%1] decrypt failed: %2").arg(sender, e.message()));
+        }
+        return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Real-time delivery socket (QWebSocket → /ws)
+// ---------------------------------------------------------------------------
+
+void MainWindow::connectWebSocket()
+{
+    // Don't stack connections if we're already up or mid-handshake.
+    if (m_webSocket->state() != QAbstractSocket::UnconnectedState) return;
+
+    const QString token = m_client->accessTokenCookie();
+
+    // Authenticate the handshake two ways for robustness: the access_token
+    // cookie (mirrors the REST auth) and a ?token= query param fallback for
+    // when the upgrade request can't carry the cookie. The backend prefers the
+    // cookie and falls back to the query param.
+    QUrl url(m_client->websocketUrl());
+    if (!token.isEmpty()) {
+        QUrlQuery q;
+        q.addQueryItem(QStringLiteral("token"), token);
+        url.setQuery(q);
+    }
+
+    QNetworkRequest req(url);
+    if (!token.isEmpty()) {
+        req.setRawHeader("Cookie", "access_token=" + token.toUtf8());
+    }
+    m_webSocket->open(req);
+}
+
+void MainWindow::onWsConnected()
+{
+    // Successful connect resets the backoff and cancels any pending retry.
+    m_reconnectDelayMs = kInitialReconnectMs;
+    m_reconnectTimer->stop();
+
+    // Catch up on anything that landed while the socket was down — the push
+    // path only covers messages sent while we were connected.
+    pollInbox();
+}
+
+void MainWindow::onWsDisconnected()
+{
+    scheduleReconnect();
+}
+
+void MainWindow::scheduleReconnect()
+{
+    // A single pending retry is enough — both disconnected and errorOccurred
+    // can fire for one drop.
+    if (m_reconnectTimer->isActive()) return;
+    m_reconnectTimer->start(m_reconnectDelayMs);
+    m_reconnectDelayMs = qMin(m_reconnectDelayMs * 2, kMaxReconnectMs);
+}
+
+void MainWindow::onWsTextMessage(const QString& text)
+{
+    const QJsonObject obj = QJsonDocument::fromJson(text.toUtf8()).object();
+    if (obj.value(QStringLiteral("type")).toString() != QStringLiteral("new_message")) return;
+
+    const QJsonObject m = obj.value(QStringLiteral("message")).toObject();
+    if (processInboundMessage(m, /*persist=*/false)) {
+        // Advance the poll cursor so the fallback poll won't refetch this one.
+        const QString id = m.value(QStringLiteral("id")).toString();
+        if (!id.isEmpty()) m_lastInboxId = id;
+        saveHistory();
+    }
 }
