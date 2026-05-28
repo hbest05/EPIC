@@ -21,7 +21,6 @@ and typically resolves in < 2 s on a public RPC endpoint.
 
 Public interface (unchanged — routers require zero modifications):
     is_configured() / blockchain_configured()  → bool
-    fire_and_forget(message_id, conversation_id, conversation_text)
     verify_on_chain(conversation_id, record_index, conversation_text) → dict
 """
 
@@ -36,7 +35,7 @@ from typing import Optional
 from web3 import AsyncWeb3
 from web3.providers import AsyncHTTPProvider
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from app.config import settings
 from app.database import AsyncSessionLocal
@@ -573,19 +572,26 @@ async def record_final_digest(conversation_id: str) -> dict:
     except Exception as exc:
         logger.warning("flush_batch during close failed for conv=%s: %s", conversation_id, exc)
 
-    # Collect all confirmed tx_hashes for the conversation from the DB.
+    # Parse conversation_id into the two participant UUIDs so we can filter
+    # the query to only messages that belong to this conversation.
+    # Format guaranteed by the close endpoint: '<min_uuid>_<max_uuid>'.
+    _parts = conversation_id.split("_", 1)
+    uid_a = _uuid_mod.UUID(_parts[0])
+    uid_b = _uuid_mod.UUID(_parts[1])
+
+    # Collect confirmed tx_hashes for this conversation only.
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Message.blockchain_tx_hash)
             .where(
                 Message.blockchain_tx_hash.isnot(None),
+                or_(
+                    and_(Message.sender_id == uid_a, Message.recipient_id == uid_b),
+                    and_(Message.sender_id == uid_b, Message.recipient_id == uid_a),
+                ),
             )
-            # Filter by conversation: both sender/recipient UUIDs embedded in conv_id.
-            # conversation_id format is '<min_uuid>_<max_uuid>'; split and match.
+            .order_by(Message.created_at.asc())
         )
-        # We can't filter by conversation_id directly without the user IDs, so
-        # the caller (close endpoint) passes the pre-validated UUID pair.
-        # For now collect all tx_hashes returned and hash them.
         tx_hashes = [row[0] for row in result.all() if row[0]]
 
     if not tx_hashes:
@@ -609,32 +615,6 @@ async def record_final_digest(conversation_id: str) -> dict:
         "tx_hash_count": len(tx_hashes),
         "flush":         flush_result,
     }
-
-
-# ---------------------------------------------------------------------------
-# Public API (imported by exact name in routers — do not rename)
-# ---------------------------------------------------------------------------
-
-def fire_and_forget(
-    message_id: str,
-    conversation_id: str,
-    conversation_text: str,
-) -> None:
-    """
-    Schedule on-chain digest recording as a background asyncio task.
-
-    Returns immediately — the HTTP 201 response is not delayed.
-    Logs a warning and skips scheduling if blockchain is not configured.
-    """
-    if not is_configured():
-        return  # warning already logged by is_configured()
-
-    # create_task runs the coroutine on the running event loop without blocking
-    # the current request.  Exceptions inside the coroutine are caught in
-    # _record_and_update so the task never causes an unhandled exception.
-    asyncio.create_task(
-        _record_and_update(message_id, conversation_id, conversation_text)
-    )
 
 
 async def verify_on_chain(
