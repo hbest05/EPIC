@@ -2,6 +2,8 @@ import base64
 import hashlib
 from datetime import datetime, timedelta, timezone
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -172,14 +174,38 @@ async def upload_prekeys(
 ):
     # Validate both fields are legal base64 before touching the DB
     try:
-        base64.b64decode(body.signed_prekey.public_key, validate=True)
-        base64.b64decode(body.signed_prekey.signature, validate=True)
+        spk_pub_bytes = base64.b64decode(body.signed_prekey.public_key, validate=True)
+        spk_sig_bytes = base64.b64decode(body.signed_prekey.signature, validate=True)
         for opk in body.one_time_prekeys:
             base64.b64decode(opk.public_key, validate=True)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="All public_key and signature fields must be valid base64",
+        )
+
+    # Verify SPK signature against the user's registered Ed25519 identity key.
+    # This catches cross-client identity races before bad data reaches the DB.
+    ed_key_result = await db.execute(
+        select(UserKey).where(
+            UserKey.user_id == current_user.id,
+            UserKey.key_type == "ed25519",
+        )
+    )
+    ed_key_row = ed_key_result.scalar_one_or_none()
+    if ed_key_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="identity keys not registered; register before uploading prekeys",
+        )
+    try:
+        Ed25519PublicKey.from_public_bytes(ed_key_row.public_key).verify(
+            spk_sig_bytes, spk_pub_bytes
+        )
+    except InvalidSignature:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="SPK signature does not verify under your registered Ed25519 identity key",
         )
 
     # Insert new SPK — old ones are kept for in-flight X3DH sessions until they expire

@@ -4,7 +4,9 @@ identity.py — long-term identity keys, Argon2id-wrapped at rest.
 Generates an X25519 identity key (IK, used for X3DH DH operations) and a
 separate Ed25519 signing key (used to sign the Signed Prekey). The pair is
 encrypted with AES-256-GCM under a key derived from the user's passphrase
-via Argon2id, then written to ~/.securemsg/identity.enc.
+via Argon2id, then written to <base>/identity.enc, where <base> is
+$SECUREMSG_HOME if set, otherwise ~/.securemsg. Overriding the base lets
+two daemons run side-by-side on one host with separate identities.
 
 The wrap key derived from the passphrase is also returned so the daemon
 can reuse it to encrypt session state at rest.
@@ -107,8 +109,17 @@ class Identity:
         return _raw_pub_x(self.ik_pub)
 
 
+def base_dir() -> Path:
+    """Base directory for daemon state. Overridable via $SECUREMSG_HOME so
+    two daemons on one host can use separate identities and session stores."""
+    override = os.environ.get("SECUREMSG_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".securemsg"
+
+
 def identity_path() -> Path:
-    return Path.home() / ".securemsg" / "identity.enc"
+    return base_dir() / "identity.enc"
 
 
 def generate(passphrase: str) -> Identity:

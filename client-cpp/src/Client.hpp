@@ -69,8 +69,22 @@ public:
                         int pn, int n,
                         const QJsonObject* x3dhHeader);
 
-    /** GET /messages/inbox. */
-    QString fetchInbox(QJsonArray* out);
+    /** GET /messages/inbox with optional pagination.
+     *  @param limit     max messages to return (server caps at 100)
+     *  @param before    return messages older than this id (empty = ignore)
+     *  @param after     return messages newer than this id (empty = ignore)
+     *  @param withUser  restrict to messages from this sender (empty = all) */
+    QString fetchInbox(QJsonArray* out,
+                       int limit = 30,
+                       const QString& before = QString(),
+                       const QString& after = QString(),
+                       const QString& withUser = QString());
+
+    /** GET /messages/sent with optional pagination. */
+    QString fetchSent(QJsonArray* out,
+                      int limit = 30,
+                      const QString& before = QString(),
+                      const QString& withUser = QString());
 
     // --- Accessors ---
     const QString& username()     const { return m_username; }

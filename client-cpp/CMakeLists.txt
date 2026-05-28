@@ -4,6 +4,11 @@ project(SecureMsg VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# TCP port the client uses to reach the local crypto daemon.
+# Override with -DDAEMON_PORT=<n> to build a second exe that talks to a
+# second daemon instance, so two clients can run side-by-side on one host.
+set(DAEMON_PORT 47291 CACHE STRING "TCP port for the local crypto daemon (default 47291)")
+
 # ---------------------------------------------------------------------------
 # Qt6 — UI framework
 # Set Qt6_DIR if Qt is not on PATH: cmake -DQt6_DIR=/path/to/qt/lib/cmake/Qt6
@@ -58,6 +63,10 @@ qt_add_executable(SecureMsg ${SOURCES} ${HEADERS})
 
 target_include_directories(SecureMsg PRIVATE
     src
+)
+
+target_compile_definitions(SecureMsg PRIVATE
+    DAEMON_PORT=${DAEMON_PORT}
 )
 
 target_link_libraries(SecureMsg PRIVATE

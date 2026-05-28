@@ -10,6 +10,7 @@ WITHOUT exposing the underlying message, so internal state never leaks.
 from __future__ import annotations
 
 import base64
+import logging
 import uuid
 from typing import Callable, Dict
 
@@ -20,6 +21,8 @@ import identity as identity_mod
 import session_store
 import x3dh as x3dh_mod
 from double_ratchet import Session, _raw_pub
+
+log = logging.getLogger(__name__)
 
 
 class OpError(Exception):
@@ -109,18 +112,46 @@ def op_load_identity(state: DaemonState, params: dict) -> dict:
         raise OpError("bad_passphrase", "identity decryption failed")
     state.identity = ident
     state.sessions = session_store.load_all_sessions(ident.wrap_key)
+    spk = session_store.load_spk(ident.wrap_key)
+    opks = session_store.load_all_opks(ident.wrap_key)
+    log.info(
+        "load_identity: spk_loaded=%s opks_loaded=%d from %s",
+        spk is not None, len(opks), session_store.opks_dir(),
+    )
+    if opks:
+        log.debug("load_identity: opk keys = %s", sorted(opks.keys()))
+    restored: dict = {}
+    if spk is not None:
+        restored.update(spk)
+    if opks:
+        restored["opks"] = opks
+    if restored:
+        # Ensure the "opks" key always exists when prekeys are restored, even
+        # if every OPK had been consumed since the last generate_prekeys.
+        restored.setdefault("opks", {})
+        state.prekeys = restored
     return {
         "ik_pub": ident.ik_pub_b64(),
         "sign_pub": ident.sign_pub_b64(),
         "sessions_loaded": len(state.sessions),
+        "spk_loaded": spk is not None,
+        "opks_loaded": len(opks),
     }
 
 
 def op_generate_prekeys(state: DaemonState, params: dict) -> dict:
     ident = state.require_identity()
+    caller_sign_pub = params.get("sign_pub")
+    if caller_sign_pub is not None:
+        if caller_sign_pub != ident.sign_pub_b64():
+            raise OpError(
+                "identity_mismatch",
+                "state.identity changed since generate_identity; call generate_identity again",
+            )
     spk_priv = X25519PrivateKey.generate()
     spk_pub_bytes = _raw_pub(spk_priv.public_key())
     spk_sig = ident.sign_priv.sign(spk_pub_bytes)
+    session_store.save_spk(spk_priv, spk_pub_bytes, spk_sig, ident.wrap_key)
 
     opks_b64 = []
     opk_map: Dict[str, X25519PrivateKey] = {}
@@ -129,13 +160,23 @@ def op_generate_prekeys(state: DaemonState, params: dict) -> dict:
         opk_pub_b64 = _b64(_raw_pub(opk.public_key()))
         opk_map[opk_pub_b64] = opk
         opks_b64.append(opk_pub_b64)
+        session_store.save_opk(opk_pub_b64, opk, ident.wrap_key)
 
+    # Merge into any existing in-memory OPKs rather than replacing them:
+    # the server retains every uploaded batch and may hand out an OPK from an
+    # earlier one, so the in-memory map must keep all unconsumed batches.
+    merged_opks = dict(state.prekeys.get("opks", {}))
+    merged_opks.update(opk_map)
     state.prekeys = {
         "spk_priv": spk_priv,
         "spk_pub_bytes": spk_pub_bytes,
         "spk_sig": spk_sig,
-        "opks": opk_map,
+        "opks": merged_opks,
     }
+    log.info(
+        "generate_prekeys: persisted %d OPKs to %s; first key=%s",
+        len(opk_map), session_store.opks_dir(), opks_b64[0] if opks_b64 else "<none>",
+    )
     return {
         "spk_pub": _b64(spk_pub_bytes),
         "spk_sig": _b64(spk_sig),
@@ -198,7 +239,7 @@ def op_x3dh_receive(state: DaemonState, params: dict) -> dict:
     if len(peer_ik_pub_bytes) != 32 or len(peer_ek_pub_bytes) != 32:
         raise OpError("bad_request", "header key wrong length")
 
-    if not state.prekeys:
+    if "spk_priv" not in state.prekeys:
         raise OpError("no_prekeys", "call generate_prekeys before x3dh_receive")
 
     my_opk_priv = None
@@ -206,9 +247,26 @@ def op_x3dh_receive(state: DaemonState, params: dict) -> dict:
     if used_opk_b64:
         if not isinstance(used_opk_b64, str):
             raise OpError("bad_request", "used_opk_pub must be string")
+        keystore_keys = sorted(state.prekeys.get("opks", {}).keys())
+        log.info(
+            "x3dh_receive: looking up used_opk_pub=%r; %d OPKs in keystore; match=%s",
+            used_opk_b64, len(keystore_keys), used_opk_b64 in keystore_keys,
+        )
+        log.debug("x3dh_receive: keystore keys = %s", keystore_keys)
         my_opk_priv = state.prekeys["opks"].pop(used_opk_b64, None)
         if my_opk_priv is None:
+            # In-memory map only holds the most recent generate_prekeys batch;
+            # the server may hand out an OPK from an earlier batch that lives
+            # on disk but not in memory. Disk is the durable source of truth.
+            my_opk_priv = session_store.load_opk(used_opk_b64, ident.wrap_key)
+            log.info(
+                "x3dh_receive: OPK %r not in memory; disk fallback match=%s",
+                used_opk_b64, my_opk_priv is not None,
+            )
+        if my_opk_priv is None:
             raise OpError("unknown_opk", "requested OPK not in our keystore")
+        # Burn the on-disk copy now so the OPK cannot be reused after a restart.
+        session_store.delete_opk(used_opk_b64)
 
     try:
         sk = x3dh_mod.derive_sk_receiver(
@@ -277,6 +335,23 @@ def op_decrypt_message(state: DaemonState, params: dict) -> dict:
     return {"plaintext": pt}
 
 
+def op_list_sessions(state: DaemonState, params: dict) -> dict:
+    """Return the restored sessions so the client can rebuild its
+    peer-username -> session-id map after a restart. No key material is
+    exposed — only the session id, peer user id, and role."""
+    state.require_identity()
+    return {
+        "sessions": [
+            {
+                "session_id": s.session_id,
+                "peer_user_id": s.peer_user_id,
+                "role": s.role,
+            }
+            for s in state.sessions.values()
+        ]
+    }
+
+
 def op_dh_ratchet_step(state: DaemonState, params: dict) -> dict:
     ident = state.require_identity()
     sid = _require_str(params, "session_id")
@@ -301,4 +376,5 @@ OPS: Dict[str, Callable[[DaemonState, dict], dict]] = {
     "encrypt_message": op_encrypt_message,
     "decrypt_message": op_decrypt_message,
     "dh_ratchet_step": op_dh_ratchet_step,
+    "list_sessions": op_list_sessions,
 }

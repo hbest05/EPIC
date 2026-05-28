@@ -3,7 +3,7 @@
  *
  * 1. Initialise libsodium and Winsock.
  * 2. Launch the Python crypto daemon as a child process if it isn't
- *    already listening on 127.0.0.1:47291.
+ *    already listening on 127.0.0.1:DAEMON_PORT (default 47291).
  * 3. Wait up to 2 seconds for the daemon's TCP socket to accept a
  *    connection; bail out with a dialog if it never comes up.
  * 4. Show LoginWindow; on loginSucceeded swap to MainWindow.
@@ -28,7 +28,7 @@
 
 namespace {
 
-constexpr quint16 kDaemonPort = 47291;
+constexpr quint16 kDaemonPort = DAEMON_PORT;
 constexpr int     kDaemonStartupTimeoutMs = 2000;
 
 bool daemonReachable()
@@ -109,7 +109,8 @@ int main(int argc, char* argv[])
 
         if (!waitForDaemon(kDaemonStartupTimeoutMs)) {
             QMessageBox::critical(nullptr, "Crypto daemon",
-                                  "Crypto daemon did not become reachable on 127.0.0.1:47291.");
+                                  QStringLiteral("Crypto daemon did not become reachable on 127.0.0.1:%1.")
+                                      .arg(kDaemonPort));
             return 1;
         }
     }
@@ -128,9 +129,9 @@ int main(int argc, char* argv[])
     LoginWindow login(&client);
     MainWindow* mainWindow = nullptr;
 
-    QObject::connect(&login, &LoginWindow::loginSucceeded, [&]() {
+    QObject::connect(&login, &LoginWindow::loginSucceeded, [&](bool freshRegistration) {
         login.hide();
-        mainWindow = new MainWindow(&client);
+        mainWindow = new MainWindow(&client, freshRegistration);
         mainWindow->setAttribute(Qt::WA_DeleteOnClose);
         mainWindow->show();
     });

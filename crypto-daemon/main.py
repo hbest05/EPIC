@@ -13,11 +13,19 @@ serialize. The C++ client is also single-threaded with respect to crypto.
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import signal
 import sys
 
 import transport
 from handlers import DaemonState, handle
+
+logging.basicConfig(
+    level=os.environ.get("SECUREMSG_LOG_LEVEL", "INFO").upper(),
+    stream=sys.stderr,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 def handle_connection(conn, state: DaemonState) -> None:

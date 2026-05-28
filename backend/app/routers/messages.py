@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy import select, update
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from sqlalchemy import select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
@@ -59,7 +59,11 @@ def _conversation_id(user_a_id, user_b_id) -> str:
     return f"{min(a, b)}_{max(a, b)}"
 
 
-def _to_response(msg: Message, sender_username: str) -> MessageResponse:
+def _to_response(
+    msg: Message,
+    sender_username: str,
+    recipient_username: Optional[str] = None,
+) -> MessageResponse:
     """Convert a Message ORM object to a wire-safe MessageResponse.
 
     The `hpke_enc_blob` column is overloaded: under the legacy HPKE flow it
@@ -87,6 +91,7 @@ def _to_response(msg: Message, sender_username: str) -> MessageResponse:
     return MessageResponse(
         id=str(msg.id),
         sender_username=sender_username,
+        recipient_username=recipient_username,
         ciphertext=base64.b64encode(msg.ciphertext).decode(),
         nonce=base64.b64encode(msg.nonce).decode(),
         hpke_enc_blob=hpke_enc_b64,
@@ -278,22 +283,105 @@ async def forward_message(
 
 
 # ---------------------------------------------------------------------------
+# Pagination helpers
+# ---------------------------------------------------------------------------
+
+async def _cursor_position(db: AsyncSession, message_id: UUID):
+    """Return (created_at, id) of a cursor message, or None if it doesn't exist.
+
+    Paging uses the composite (created_at, id) key so the cursor is stable even
+    when several messages share a created_at timestamp.
+    """
+    result = await db.execute(
+        select(Message.created_at, Message.id).where(Message.id == message_id)
+    )
+    return result.one_or_none()
+
+
+async def _resolve_peer_id(db: AsyncSession, username: str):
+    """Resolve a username to its user id, or None if no such user."""
+    result = await db.execute(select(User.id).where(User.username == username))
+    return result.scalar_one_or_none()
+
+
+# ---------------------------------------------------------------------------
 # GET /inbox
 # ---------------------------------------------------------------------------
 
 @router.get("/inbox", response_model=list[MessageResponse])
 async def get_inbox(
+    limit: int = Query(30, ge=1, le=100),
+    before: Optional[UUID] = Query(None, description="Return messages older than this id"),
+    after: Optional[UUID] = Query(None, description="Return messages newer than this id"),
+    with_user: Optional[str] = Query(None, description="Restrict to messages from this sender"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession  = Depends(get_db),
 ):
-    result = await db.execute(
+    stmt = (
         select(Message, User.username)
         .join(User, User.id == Message.sender_id)
         .where(Message.recipient_id == current_user.id)
-        .order_by(Message.created_at.desc())
     )
-    rows = result.all()
+
+    if with_user is not None:
+        peer_id = await _resolve_peer_id(db, with_user)
+        if peer_id is None:
+            return []
+        stmt = stmt.where(Message.sender_id == peer_id)
+
+    if before is not None:
+        cur = await _cursor_position(db, before)
+        if cur is None:
+            return []
+        stmt = stmt.where(tuple_(Message.created_at, Message.id) < tuple_(cur.created_at, cur.id))
+
+    if after is not None:
+        cur = await _cursor_position(db, after)
+        if cur is None:
+            return []
+        stmt = stmt.where(tuple_(Message.created_at, Message.id) > tuple_(cur.created_at, cur.id))
+
+    stmt = stmt.order_by(Message.created_at.desc(), Message.id.desc()).limit(limit)
+    rows = (await db.execute(stmt)).all()
     return [_to_response(msg, username) for msg, username in rows]
+
+
+# ---------------------------------------------------------------------------
+# GET /sent
+# ---------------------------------------------------------------------------
+
+@router.get("/sent", response_model=list[MessageResponse])
+async def get_sent(
+    limit: int = Query(30, ge=1, le=100),
+    before: Optional[UUID] = Query(None, description="Return messages older than this id"),
+    with_user: Optional[str] = Query(None, description="Restrict to messages to this recipient"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession  = Depends(get_db),
+):
+    stmt = (
+        select(Message, User.username)
+        .join(User, User.id == Message.recipient_id)
+        .where(Message.sender_id == current_user.id)
+    )
+
+    if with_user is not None:
+        peer_id = await _resolve_peer_id(db, with_user)
+        if peer_id is None:
+            return []
+        stmt = stmt.where(Message.recipient_id == peer_id)
+
+    if before is not None:
+        cur = await _cursor_position(db, before)
+        if cur is None:
+            return []
+        stmt = stmt.where(tuple_(Message.created_at, Message.id) < tuple_(cur.created_at, cur.id))
+
+    stmt = stmt.order_by(Message.created_at.desc(), Message.id.desc()).limit(limit)
+    rows = (await db.execute(stmt)).all()
+    return [
+        _to_response(msg, current_user.username, recipient_username=recipient_username)
+        for msg, recipient_username in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

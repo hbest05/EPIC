@@ -10,7 +10,10 @@
  * until the matching response arrives, and either returns a parsed
  * result or throws a CryptoDaemonError on a non-ok status. The daemon
  * processes requests in order over a single TCP connection on
- * 127.0.0.1:47291 — see crypto-daemon/README.md for the wire protocol.
+ * 127.0.0.1:DAEMON_PORT (default 47291) — see crypto-daemon/README.md for
+ * the wire protocol. DAEMON_PORT is set at build time via the CMake cache
+ * variable of the same name; pass -DDAEMON_PORT=<n> to bind a second exe
+ * to a second daemon for running two clients on one host.
  */
 
 #include <QtCore/QByteArray>
@@ -19,6 +22,10 @@
 #include <QtCore/QString>
 #include <stdexcept>
 #include <cstdint>
+
+#ifndef DAEMON_PORT
+#  define DAEMON_PORT 47291
+#endif
 
 class QTcpSocket;
 
@@ -114,7 +121,7 @@ public:
      *         within `connectTimeoutMs`.
      */
     explicit CryptoDaemonClient(const QString& host = QStringLiteral("127.0.0.1"),
-                                uint16_t port = 47291,
+                                uint16_t port = DAEMON_PORT,
                                 int connectTimeoutMs = 2000);
 
     ~CryptoDaemonClient();
@@ -132,6 +139,14 @@ public:
         QByteArray signPub;          ///< Ed25519 signing public key
     };
 
+    /** One restored Double Ratchet session, as reported by list_sessions. */
+    struct SessionInfo
+    {
+        QString sessionId;
+        QString peerUserId;       ///< Peer username this session talks to
+        QString role;             ///< "initiator" or "responder"
+    };
+
     // --- Identity ---
 
     /** Generate a fresh identity (X25519 IK + Ed25519 signing key). */
@@ -140,10 +155,17 @@ public:
     /** Decrypt the on-disk identity file and load any saved sessions. */
     Identity loadIdentity(const QString& passphrase);
 
+    /** List the sessions restored by loadIdentity so the UI can rebuild its
+     *  peer-username -> session-id map across restarts. */
+    QList<SessionInfo> listSessions();
+
     // --- Prekeys ---
 
-    /** Generate a new Signed Prekey and 10 One-Time Prekeys. */
-    PrekeyBundle generatePrekeys();
+    /** Generate a new Signed Prekey and 10 One-Time Prekeys.
+     *  Pass the Ed25519 signPub returned by generateIdentity so the daemon
+     *  can detect an identity-overwrite race and fail fast. Omit it (empty)
+     *  for steady-state OPK replenishment where no fresh identity claim exists. */
+    PrekeyBundle generatePrekeys(const QByteArray& signPub = QByteArray());
 
     // --- X3DH session establishment ---
 

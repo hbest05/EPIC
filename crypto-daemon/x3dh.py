@@ -18,6 +18,8 @@ aborts the operation.
 from __future__ import annotations
 
 import base64
+import hashlib
+import logging
 from typing import Optional, Tuple
 
 from cryptography.exceptions import InvalidSignature
@@ -29,8 +31,15 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 )
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+log = logging.getLogger(__name__)
+
 X3DH_INFO = b"SecureMsg_X3DH_v1"
 X3DH_SALT = b"\x00" * 32
+
+
+def _fp(b: bytes) -> str:
+    """Short SHA-256 fingerprint for diagnostic logging."""
+    return hashlib.sha256(b).hexdigest()[:16]
 
 
 class InvalidBundleError(Exception):
@@ -71,6 +80,8 @@ def derive_sk_sender(
     """
     for k in ("ik_pub", "sign_pub", "spk_pub", "spk_sig"):
         if k not in peer_bundle or not isinstance(peer_bundle[k], str):
+            log.error("x3dh_send: bundle missing/invalid field %r; got keys=%r",
+                      k, sorted(peer_bundle.keys()))
             raise InvalidBundleError(f"missing or non-string field: {k}")
 
     peer_ik_pub_bytes = _validate_b64_key(peer_bundle["ik_pub"], "ik_pub")
@@ -79,9 +90,27 @@ def derive_sk_sender(
     try:
         spk_sig = base64.b64decode(peer_bundle["spk_sig"], validate=True)
     except Exception as exc:
+        log.error("x3dh_send: spk_sig not valid base64: %r", peer_bundle["spk_sig"][:32])
         raise InvalidBundleError("spk_sig: not valid base64") from exc
     if len(spk_sig) != 64:
+        log.error("x3dh_send: spk_sig wrong length: got %d, expected 64", len(spk_sig))
         raise InvalidBundleError("spk_sig: expected 64 bytes")
+
+    log.info(
+        "x3dh_send: verifying SPK sig\n"
+        "  sign_pub (Ed25519, %d bytes) fp=%s\n"
+        "    b64=%s\n"
+        "  spk_pub  (X25519,  %d bytes) fp=%s\n"
+        "    b64=%s\n"
+        "  spk_sig  (Ed25519, %d bytes) fp=%s\n"
+        "    b64=%s",
+        len(peer_sign_pub_bytes), _fp(peer_sign_pub_bytes),
+        base64.b64encode(peer_sign_pub_bytes).decode(),
+        len(spk_pub_bytes), _fp(spk_pub_bytes),
+        base64.b64encode(spk_pub_bytes).decode(),
+        len(spk_sig), _fp(spk_sig),
+        base64.b64encode(spk_sig).decode(),
+    )
 
     # Verify SPK signature BEFORE any DH operations.
     try:
@@ -89,6 +118,21 @@ def derive_sk_sender(
             spk_sig, spk_pub_bytes
         )
     except InvalidSignature as exc:
+        log.error(
+            "x3dh_send: SPK signature verification FAILED.\n"
+            "  Ed25519 sign_pub does not verify the signature over spk_pub.\n"
+            "  sign_pub b64 = %s\n"
+            "  spk_pub  b64 = %s\n"
+            "  spk_sig  b64 = %s\n"
+            "Compare these byte-for-byte against bob's REGISTRATION upload\n"
+            "(ed25519_public_key) and his most-recent prekey upload (spk).\n"
+            "Likely causes: (a) sign_pub from the bundle is not the key that\n"
+            "signed spk_pub — peer-side identity/prekey mismatch — or\n"
+            "(b) spk_pub bytes differ between signer and bundle.",
+            base64.b64encode(peer_sign_pub_bytes).decode(),
+            base64.b64encode(spk_pub_bytes).decode(),
+            base64.b64encode(spk_sig).decode(),
+        )
         raise InvalidBundleError("SPK signature verification failed") from exc
 
     peer_ik_pub = X25519PublicKey.from_public_bytes(peer_ik_pub_bytes)

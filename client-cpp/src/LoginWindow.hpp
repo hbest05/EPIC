@@ -24,7 +24,10 @@ public:
     explicit LoginWindow(Client* client, QWidget* parent = nullptr);
 
 signals:
-    void loginSucceeded();
+    /** @param freshRegistration true when the account was just created (and a
+     *  full prekey batch already uploaded), so MainWindow can skip its
+     *  redundant startup OPK replenish. */
+    void loginSucceeded(bool freshRegistration);
 
 private slots:
     void onLoginClicked();
