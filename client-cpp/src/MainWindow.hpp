@@ -28,7 +28,11 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 
 public:
-    explicit MainWindow(Client* client, QWidget* parent = nullptr);
+    /** @param freshRegistration when true, skip the startup OPK replenish —
+     *  registration has already uploaded a full prekey batch, so replenishing
+     *  again would push a second batch the daemon hasn't tracked in memory. */
+    explicit MainWindow(Client* client, bool freshRegistration = false,
+                        QWidget* parent = nullptr);
 
 private slots:
     void onSendClicked();

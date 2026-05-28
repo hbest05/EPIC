@@ -109,7 +109,7 @@ void LoginWindow::onLoginClicked()
     }
 
     m_statusLabel->setText(tr("Welcome back, %1.").arg(user));
-    emit loginSucceeded();
+    emit loginSucceeded(false);
 }
 
 void LoginWindow::onRegisterClicked()
@@ -132,7 +132,7 @@ void LoginWindow::onRegisterClicked()
     PrekeyBundle prekeys;
     try {
         identity = m_client->daemon()->generateIdentity(pass);
-        prekeys  = m_client->daemon()->generatePrekeys();
+        prekeys  = m_client->daemon()->generatePrekeys(identity.signPub);
     } catch (const CryptoDaemonError& e) {
         m_statusLabel->setText(tr("Identity generation failed: %1").arg(e.message()));
         return;
@@ -159,5 +159,5 @@ void LoginWindow::onRegisterClicked()
     }
 
     m_statusLabel->setText(tr("Welcome, %1.").arg(user));
-    emit loginSucceeded();
+    emit loginSucceeded(true);
 }

@@ -2,7 +2,7 @@
  * CryptoDaemonClient.cpp — synchronous transport for the Python daemon.
  *
  * Newline-delimited JSON over a single QTcpSocket connection to
- * 127.0.0.1:47291. All calls are blocking; the daemon is single-threaded
+ * 127.0.0.1:DAEMON_PORT (default 47291). All calls are blocking; the daemon is single-threaded
  * and serves one request at a time, so the UI thread layers a 10-second
  * timeout per call on top of Qt's socket I/O and surfaces any failure as
  * a CryptoDaemonError.
@@ -139,9 +139,13 @@ CryptoDaemonClient::Identity CryptoDaemonClient::loadIdentity(const QString& pas
     return id;
 }
 
-PrekeyBundle CryptoDaemonClient::generatePrekeys()
+PrekeyBundle CryptoDaemonClient::generatePrekeys(const QByteArray& signPub)
 {
-    const QJsonObject data = call(QStringLiteral("generate_prekeys"), QJsonObject{});
+    QJsonObject params;
+    if (!signPub.isEmpty()) {
+        params.insert(QStringLiteral("sign_pub"), b64encode(signPub));
+    }
+    const QJsonObject data = call(QStringLiteral("generate_prekeys"), params);
 
     PrekeyBundle out;
     out.spkPub = b64decode(data.value(QStringLiteral("spk_pub")));

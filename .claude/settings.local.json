@@ -4,7 +4,28 @@
       "PowerShell(Get-ChildItem \"c:\\\\Users\\\\m4tth\\\\EPIC\" -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object -ExpandProperty FullName | Sort-Object)",
       "Bash(python -c \"import cryptography, argon2; print\\('cryptography', cryptography.__version__\\); print\\('argon2', argon2.__version__\\)\")",
       "Bash(pip install *)",
-      "Bash(python test_daemon.py)"
+      "Bash(python test_daemon.py)",
+      "Bash(git -C c:/Users/m4tth/EPIC diff crypto-daemon/x3dh.py)",
+      "Bash(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p 2202 student@200.69.13.70 'echo connected; uname -a; docker ps --format \"table {{.Names}}\\\\t{{.Status}}\\\\t{{.Image}}\"')",
+      "Bash(ssh -p 2202 student@200.69.13.70 'docker logs --tail 300 epic-api-1 2>&1 | grep -iE \"x3dh|spk|aead|invalid|prekey|signature|bundle|error|exception\" | tail -80')",
+      "Bash(ssh -p 2202 student@200.69.13.70 'docker logs --tail 80 epic-api-1 2>&1')",
+      "Bash(ssh -p 2202 student@200.69.13.70 'docker exec epic-db-1 psql -U postgres -d postgres -c \"\\\\dt\" 2>&1 | head -30')",
+      "Bash(ssh -p 2202 student@200.69.13.70 'docker exec epic-db-1 psql -U securemsg -d securemsg -c \"\\\\dt\" 2>&1')",
+      "Bash(ssh -p 2202 student@200.69.13.70 'docker exec epic-db-1 psql -U securemsg -d securemsg -c \"SELECT u.username, uk.key_type, encode\\(uk.public_key, '\"'\"'base64'\"'\"'\\) AS pub_b64, length\\(uk.public_key\\) AS raw_len FROM users u JOIN user_keys uk ON uk.user_id = u.id ORDER BY u.username, uk.key_type;\"')",
+      "Bash(ssh -p *)",
+      "Bash(scp -P 2202 c:/Users/m4tth/EPIC/.tmp_verify_spk.py student@200.69.13.70:/tmp/verify_spk.py)",
+      "Bash(cmake -S c:/Users/m4tth/EPIC/client-cpp -B c:/Users/m4tth/EPIC/client-cpp/build-47292 -G Ninja -DCMAKE_BUILD_TYPE=Release -DDAEMON_PORT=47292 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_CXX_COMPILER=C:/mingw64/bin/c++.exe -DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe -DQt6_DIR=C:/Qt/6.11.1/mingw_64/lib/cmake/Qt6)",
+      "Bash(cmake --build c:/Users/m4tth/EPIC/client-cpp/build-47292 --config Release)",
+      "Bash(python -c \"import identity, session_store; print\\('identity.base_dir\\(\\)    =', identity.base_dir\\(\\)\\); print\\('identity.identity_path\\(\\)=', identity.identity_path\\(\\)\\); print\\('session_store.sessions_dir\\(\\) =', session_store.sessions_dir\\(\\)\\)\")",
+      "Bash(SECUREMSG_HOME=/tmp/alt-home python -c \"import identity, session_store; print\\('override identity_path =', identity.identity_path\\(\\)\\); print\\('override sessions_dir  =', session_store.sessions_dir\\(\\)\\)\")",
+      "Bash(scp -P 2202 c:/Users/m4tth/EPIC/.tmp_verify_spk2.py student@200.69.13.70:/tmp/verify_spk2.py)",
+      "Bash(scp -P 2202 c:/Users/m4tth/EPIC/.tmp_verify_spk3.py student@200.69.13.70:/tmp/verify_spk3.py)",
+      "Bash(ssh student@200.69.13.70 -p 2202 \"docker exec epic-db-1 psql -U securemsg -d securemsg -c \\\\\"DELETE FROM users WHERE username IN \\('alice', 'bob'\\) RETURNING username;\\\\\"\")",
+      "Bash(ssh student@200.69.13.70 -p 2202 'docker exec epic-db-1 psql -U securemsg -d securemsg -c \" *)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\), f\\) for f in \\('handlers.py','session_store.py','x3dh.py'\\)]; print\\('OK'\\)\")",
+      "Bash(cmake --build __TRACKED_VAR__/EPIC/client-cpp/build)",
+      "Bash(tasklist)",
+      "Bash(cmake --build __TRACKED_VAR__/EPIC/client-cpp/build-47292)"
     ]
   }
 }

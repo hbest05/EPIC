@@ -36,7 +36,7 @@ QByteArray b64dec(const QJsonValue& v)
 
 } // namespace
 
-MainWindow::MainWindow(Client* client, QWidget* parent)
+MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     : QMainWindow(parent)
     , m_client(client)
     , m_pollTimer(new QTimer(this))
@@ -90,16 +90,21 @@ MainWindow::MainWindow(Client* client, QWidget* parent)
 
     m_pollTimer->start(5000);
 
-    // Replenish OPK pool on startup — Bobs who run out can't receive new sessions.
-    try {
-        const PrekeyBundle pre = m_client->daemon()->generatePrekeys();
-        const QString err = m_client->uploadPrekeys(pre.spkPub, pre.spkSig, pre.opks);
-        if (!err.isEmpty()) {
-            QMessageBox::warning(this, tr("Prekey refresh failed"), err);
+    // Replenish OPK pool on startup — Bobs who run out can't receive new
+    // sessions. Skip right after registration: that flow already uploaded a
+    // full batch, and a second upload here would seed server OPKs from a batch
+    // the daemon only partially holds in memory.
+    if (!freshRegistration) {
+        try {
+            const PrekeyBundle pre = m_client->daemon()->generatePrekeys();
+            const QString err = m_client->uploadPrekeys(pre.spkPub, pre.spkSig, pre.opks);
+            if (!err.isEmpty()) {
+                QMessageBox::warning(this, tr("Prekey refresh failed"), err);
+            }
+        } catch (const CryptoDaemonError& e) {
+            QMessageBox::warning(this, tr("Prekey refresh failed"),
+                                 tr("Daemon error: %1").arg(e.message()));
         }
-    } catch (const CryptoDaemonError& e) {
-        QMessageBox::warning(this, tr("Prekey refresh failed"),
-                             tr("Daemon error: %1").arg(e.message()));
     }
 }
 
