@@ -433,3 +433,25 @@ async def get_message(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     return _to_response(msg, sender_username)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /{message_id}
+# ---------------------------------------------------------------------------
+
+@router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_message(
+    message_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession  = Depends(get_db),
+):
+    result = await db.execute(select(Message).where(Message.id == message_id))
+    msg = result.scalar_one_or_none()
+    if msg is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    # Only the sender or recipient may delete a message
+    if msg.sender_id != current_user.id and msg.recipient_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    await db.delete(msg)
