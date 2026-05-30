@@ -49,6 +49,8 @@ private slots:
 
     void onSelectionChanged();
     void onSelectionDeleteClicked();
+    void onSelectionForwardClicked();
+    void onForwardSingle(int row);
     void enterSelectionMode(int initialRow = -1);
     void exitSelectionMode();
 
@@ -77,6 +79,10 @@ private:
     /** Establish a Double Ratchet session with a new contact by fetching
      *  their key bundle and running x3dh_send for the opening message. */
     bool startSessionWith(const QString& username, QString* err);
+
+    /** Encrypt and send text to contact (handles X3DH vs ratchet, appends to
+     *  local thread). Used by onSendClicked and the forward paths. */
+    bool sendTextToContact(const QString& contact, const QString& text);
 
     /** Add a contact to the list widget if it isn't already present. */
     void ensureContact(const QString& username);
@@ -130,6 +136,11 @@ private:
     QWidget*     m_selectionBar;
     QLabel*      m_selectionCountLabel;
     QPushButton* m_selectionDeleteButton;
+    QPushButton* m_selectionForwardButton;
+
+    /** Show a contact-picker dialog; returns chosen username or empty on cancel.
+     *  Excludes excludeUsername (the active contact) from the suggestion list. */
+    QString pickForwardTarget(const QString& excludeUsername = QString());
 
     QString m_activeContact;
 

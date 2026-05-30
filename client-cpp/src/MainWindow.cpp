@@ -130,6 +130,7 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     , m_selectionBar(new QWidget(this))
     , m_selectionCountLabel(new QLabel(this))
     , m_selectionDeleteButton(new QPushButton(tr("Delete"), this))
+    , m_selectionForwardButton(new QPushButton(tr("Forward"), this))
 {
     setWindowTitle(tr("SecureMsg"));
     resize(900, 600);
@@ -151,8 +152,10 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     auto* selBarLayout = new QHBoxLayout(m_selectionBar);
     selBarLayout->setContentsMargins(4, 4, 4, 4);
     m_selectionDeleteButton->setEnabled(false);
+    m_selectionForwardButton->setEnabled(false);
     auto* cancelSelButton = new QPushButton(tr("Cancel"), this);
     selBarLayout->addWidget(m_selectionCountLabel, 1);
+    selBarLayout->addWidget(m_selectionForwardButton);
     selBarLayout->addWidget(m_selectionDeleteButton);
     selBarLayout->addWidget(cancelSelButton);
     m_selectionBar->setVisible(false);
@@ -191,7 +194,8 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     connect(m_thread, &QListWidget::customContextMenuRequested,
             this, &MainWindow::onThreadContextMenu);
     connect(m_thread,                &QListWidget::itemSelectionChanged, this, &MainWindow::onSelectionChanged);
-    connect(m_selectionDeleteButton, &QPushButton::clicked,         this, &MainWindow::onSelectionDeleteClicked);
+    connect(m_selectionDeleteButton,  &QPushButton::clicked, this, &MainWindow::onSelectionDeleteClicked);
+    connect(m_selectionForwardButton, &QPushButton::clicked, this, &MainWindow::onSelectionForwardClicked);
     connect(cancelSelButton,         &QPushButton::clicked,         this, &MainWindow::exitSelectionMode);
     connect(m_addContactButton,      &QPushButton::clicked,         this, &MainWindow::onAddContactClicked);
     connect(m_loadOlderButton,       &QPushButton::clicked,         this, &MainWindow::onLoadOlderClicked);
@@ -448,6 +452,76 @@ void MainWindow::onAddContactClicked()
 // Send
 // ---------------------------------------------------------------------------
 
+bool MainWindow::sendTextToContact(const QString& contact, const QString& text)
+{
+    QString sessionId = m_sessions.value(contact);
+    QString msgId;
+
+    try {
+        if (sessionId.isEmpty()) {
+            // First message to this contact — fetch keybundle, run x3dh_send.
+            QJsonObject bundle;
+            const QString fetchErr = m_client->fetchKeybundle(contact, &bundle);
+            if (!fetchErr.isEmpty()) {
+                QMessageBox::warning(this, tr("Couldn't reach %1").arg(contact), fetchErr);
+                return false;
+            }
+            PeerKeyBundle peer;
+            peer.ikPub   = b64dec(bundle.value(QStringLiteral("ik_x25519")));
+            peer.signPub = b64dec(bundle.value(QStringLiteral("ik_ed25519")));
+            const QJsonObject spk = bundle.value(QStringLiteral("spk")).toObject();
+            peer.spkPub = b64dec(spk.value(QStringLiteral("public_key")));
+            peer.spkSig = b64dec(spk.value(QStringLiteral("signature")));
+            const QJsonValue opkVal = bundle.value(QStringLiteral("opk"));
+            if (opkVal.isObject())
+                peer.opkPub = b64dec(opkVal.toObject().value(QStringLiteral("public_key")));
+
+            const X3dhSendResult r = m_client->daemon()->x3dhSend(contact, text, peer);
+
+            QJsonObject hdr;
+            hdr.insert(QStringLiteral("ik_a"), QString::fromUtf8(r.ikPub.toBase64()));
+            hdr.insert(QStringLiteral("ek_a"), QString::fromUtf8(r.ekPub.toBase64()));
+            if (!r.usedOpkPub.isEmpty())
+                hdr.insert(QStringLiteral("used_opk_pub"),
+                           QString::fromUtf8(r.usedOpkPub.toBase64()));
+
+            const QString err = m_client->sendMessage(contact,
+                                                      r.ciphertext, r.nonce,
+                                                      r.ratchetPub, r.pn, r.n,
+                                                      &hdr, &msgId);
+            if (!err.isEmpty()) {
+                QMessageBox::warning(this, tr("Send failed"), err);
+                return false;
+            }
+            m_sessions.insert(contact, r.sessionId);
+            m_sentFirstMessage.insert(contact, true);
+        } else {
+            const EncryptedMessage enc =
+                m_client->daemon()->encryptMessage(sessionId, text);
+            const QString err = m_client->sendMessage(contact,
+                                                      enc.ciphertext, enc.nonce,
+                                                      enc.ratchetPub, enc.pn, enc.n,
+                                                      nullptr, &msgId);
+            if (!err.isEmpty()) {
+                QMessageBox::warning(this, tr("Send failed"), err);
+                return false;
+            }
+        }
+    } catch (const CryptoDaemonError& e) {
+        QMessageBox::warning(this, tr("Encrypt failed"), e.message());
+        return false;
+    }
+
+    ThreadMessage mine;
+    mine.id     = msgId;
+    mine.fromMe = true;
+    mine.sender = m_client->username();
+    mine.text   = text;
+    mine.ts     = nowIso();
+    appendMessage(contact, mine);
+    return true;
+}
+
 void MainWindow::onSendClicked()
 {
     if (m_activeContact.isEmpty()) {
@@ -458,81 +532,7 @@ void MainWindow::onSendClicked()
     const QString text = m_compose->text();
     if (text.isEmpty()) return;
     m_compose->clear();
-
-    const QString contact = m_activeContact;
-    QString sessionId = m_sessions.value(contact);
-
-    try {
-        if (sessionId.isEmpty()) {
-            // First message — fetch bundle (again, fresh OPK) and run x3dh_send.
-            QJsonObject bundle;
-            const QString fetchErr = m_client->fetchKeybundle(contact, &bundle);
-            if (!fetchErr.isEmpty()) {
-                QMessageBox::warning(this, tr("Couldn't reach %1").arg(contact), fetchErr);
-                return;
-            }
-            PeerKeyBundle peer;
-            peer.ikPub   = b64dec(bundle.value(QStringLiteral("ik_x25519")));
-            peer.signPub = b64dec(bundle.value(QStringLiteral("ik_ed25519")));
-            const QJsonObject spk = bundle.value(QStringLiteral("spk")).toObject();
-            peer.spkPub = b64dec(spk.value(QStringLiteral("public_key")));
-            peer.spkSig = b64dec(spk.value(QStringLiteral("signature")));
-            const QJsonValue opkVal = bundle.value(QStringLiteral("opk"));
-            if (opkVal.isObject()) {
-                peer.opkPub = b64dec(opkVal.toObject().value(QStringLiteral("public_key")));
-            }
-
-            const X3dhSendResult r = m_client->daemon()->x3dhSend(contact, text, peer);
-
-            QJsonObject hdr;
-            hdr.insert(QStringLiteral("ik_a"), QString::fromUtf8(r.ikPub.toBase64()));
-            hdr.insert(QStringLiteral("ek_a"), QString::fromUtf8(r.ekPub.toBase64()));
-            if (!r.usedOpkPub.isEmpty()) {
-                hdr.insert(QStringLiteral("used_opk_pub"),
-                           QString::fromUtf8(r.usedOpkPub.toBase64()));
-            }
-
-            QString sentId;
-            const QString err = m_client->sendMessage(contact,
-                                                      r.ciphertext, r.nonce,
-                                                      r.ratchetPub, r.pn, r.n,
-                                                      &hdr, &sentId);
-            if (!err.isEmpty()) {
-                QMessageBox::warning(this, tr("Send failed"), err);
-                return;
-            }
-
-            m_sessions.insert(contact, r.sessionId);
-            m_sentFirstMessage.insert(contact, true);
-            sessionId = sentId;  // reuse variable to carry the id out of the branch
-        } else {
-            const EncryptedMessage enc =
-                m_client->daemon()->encryptMessage(sessionId, text);
-            QString sentId;
-            const QString err = m_client->sendMessage(contact,
-                                                      enc.ciphertext, enc.nonce,
-                                                      enc.ratchetPub, enc.pn, enc.n,
-                                                      nullptr, &sentId);
-            if (!err.isEmpty()) {
-                QMessageBox::warning(this, tr("Send failed"), err);
-                return;
-            }
-            sessionId = sentId;
-        }
-    } catch (const CryptoDaemonError& e) {
-        QMessageBox::warning(this, tr("Encrypt failed"), e.message());
-        return;
-    }
-
-    // Cache the plaintext locally — we can never recover it from the server
-    // (we don't keep our own send-side message keys).
-    ThreadMessage mine;
-    mine.id     = sessionId;  // server UUID captured from the POST /send response
-    mine.fromMe = true;
-    mine.sender = m_client->username();
-    mine.text   = text;
-    mine.ts     = nowIso();
-    appendMessage(contact, mine);
+    sendTextToContact(m_activeContact, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +732,7 @@ void MainWindow::onSelectionChanged()
         n == 1 ? tr("1 message selected")
                : tr("%1 messages selected").arg(n));
     m_selectionDeleteButton->setEnabled(n > 0);
+    m_selectionForwardButton->setEnabled(n > 0);
 }
 
 void MainWindow::onSelectionDeleteClicked()
@@ -833,16 +834,16 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
     const int row = m_thread->row(item);
 
     QMenu menu(this);
-    QAction* deleteAction = menu.addAction(tr("Delete message"));
+    QAction* deleteAction  = menu.addAction(tr("Delete message"));
+    QAction* forwardAction = menu.addAction(tr("Forward message…"));
     menu.addSeparator();
-    QAction* selectAction = menu.addAction(tr("Select messages…"));
-    const QAction* chosen = menu.exec(m_thread->mapToGlobal(pos));
+    QAction* selectAction  = menu.addAction(tr("Select messages…"));
+    const QAction* chosen  = menu.exec(m_thread->mapToGlobal(pos));
     if (!chosen) return;
 
-    if (chosen == selectAction) {
-        enterSelectionMode(row);
-        return;
-    }
+    if (chosen == selectAction)  { enterSelectionMode(row); return; }
+    if (chosen == forwardAction) { onForwardSingle(row);    return; }
+    if (chosen != deleteAction)  { return; }
 
     // --- Delete single message ---
     const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
@@ -868,4 +869,97 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
     m_threads[m_activeContact].removeAt(idx);
     saveHistory();
     renderActiveThread();
+}
+
+// ---------------------------------------------------------------------------
+// Forward
+// ---------------------------------------------------------------------------
+
+QString MainWindow::pickForwardTarget(const QString& excludeUsername)
+{
+    // Build contact list from everyone we have a thread with, minus current contact.
+    QStringList contacts;
+    for (const QString& c : m_threads.keys())
+        if (c != excludeUsername) contacts << c;
+    contacts.sort(Qt::CaseInsensitive);
+
+    bool ok = false;
+    QString target;
+    if (contacts.isEmpty()) {
+        target = QInputDialog::getText(this, tr("Forward to"),
+                                       tr("Username:"), QLineEdit::Normal,
+                                       QString{}, &ok).trimmed();
+    } else {
+        // Editable so the user can also type someone not yet in their contacts.
+        target = QInputDialog::getItem(this, tr("Forward to"),
+                                       tr("Select or type a contact:"),
+                                       contacts, 0, /*editable=*/true, &ok).trimmed();
+    }
+    return ok ? target : QString{};
+}
+
+void MainWindow::onForwardSingle(int row)
+{
+    const QString target = pickForwardTarget(m_activeContact);
+    if (target.isEmpty()) return;
+    if (target == m_client->username()) {
+        QMessageBox::warning(this, tr("Cannot forward"),
+                             tr("You cannot forward a message to yourself."));
+        return;
+    }
+
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+    const int idx   = start + row;
+    if (idx < 0 || idx >= all.size()) return;
+
+    // Client-side re-encryption — decrypt already in m_threads, re-encrypt fresh.
+    const ThreadMessage& msg = all.at(idx);
+    const QString origSender = msg.fromMe ? m_client->username() : msg.sender;
+    const QString fwdText = QChar(0x21AA) + QStringLiteral(" from ")
+                            + origSender + QStringLiteral(": ") + msg.text;
+    if (sendTextToContact(target, fwdText))
+        QMessageBox::information(this, tr("Forwarded"),
+                                 tr("Message forwarded to %1.").arg(target));
+}
+
+void MainWindow::onSelectionForwardClicked()
+{
+    if (m_activeContact.isEmpty()) return;
+    const QList<QListWidgetItem*> selected = m_thread->selectedItems();
+    if (selected.isEmpty()) return;
+
+    const QString target = pickForwardTarget(m_activeContact);
+    if (target.isEmpty()) return;
+    if (target == m_client->username()) {
+        QMessageBox::warning(this, tr("Cannot forward"),
+                             tr("You cannot forward messages to yourself."));
+        return;
+    }
+
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+
+    // The first call may do X3DH (establishing a session); subsequent calls in
+    // this loop use the ratchet session created by the first.
+    int successCount = 0;
+    for (const QListWidgetItem* item : selected) {
+        const int idx = start + m_thread->row(item);
+        if (idx < 0 || idx >= all.size()) continue;
+        const ThreadMessage& msg = all.at(idx);
+        const QString origSender = msg.fromMe ? m_client->username() : msg.sender;
+        const QString fwdText = QChar(0x21AA) + QStringLiteral(" from ")
+                                + origSender + QStringLiteral(": ") + msg.text;
+        if (!sendTextToContact(target, fwdText)) {
+            exitSelectionMode();
+            return;
+        }
+        ++successCount;
+    }
+
+    QMessageBox::information(this, tr("Forwarded"),
+                             tr("%1 message(s) forwarded to %2.").arg(successCount).arg(target));
+    exitSelectionMode();
 }
