@@ -75,20 +75,6 @@ class MessageResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Message forwarding
-# ---------------------------------------------------------------------------
-
-class ForwardMessageRequest(BaseModel):
-    target_user_id: UUID
-
-
-class ForwardMessageResponse(BaseModel):
-    id: UUID
-    tx_hash: Optional[str] = None
-    etherscan_url: Optional[str] = None
-
-
-# ---------------------------------------------------------------------------
 # Access revocation
 # ---------------------------------------------------------------------------
 
