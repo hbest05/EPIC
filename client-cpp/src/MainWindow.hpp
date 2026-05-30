@@ -23,7 +23,6 @@ class QLineEdit;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
-class QTextEdit;
 class QTimer;
 class QWebSocket;
 
@@ -38,12 +37,20 @@ public:
     explicit MainWindow(Client* client, bool freshRegistration = false,
                         QWidget* parent = nullptr);
 
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
 private slots:
     void onSendClicked();
     void onAddContactClicked();
+    void onThreadContextMenu(const QPoint& pos);
     void onContactSelected(QListWidgetItem* item);
     void onLoadOlderClicked();
     void pollInbox();
+
+    void onSelectionChanged();
+    void onSelectionDeleteClicked();
+    void enterSelectionMode(int initialRow = -1);
+    void exitSelectionMode();
 
     // --- Real-time delivery socket ---
     void onWsConnected();
@@ -111,12 +118,18 @@ private:
     int         m_reconnectDelayMs;     // current backoff delay, capped at kMaxReconnectMs
 
     QListWidget* m_contactList;
-    QTextEdit*   m_thread;
+    QListWidget* m_thread;
     QLineEdit*   m_compose;
     QPushButton* m_sendButton;
     QPushButton* m_addContactButton;
     QPushButton* m_loadOlderButton;
     QLabel*      m_topBar;
+
+    bool         m_selectionMode = false;
+    QWidget*     m_composeWidget;
+    QWidget*     m_selectionBar;
+    QLabel*      m_selectionCountLabel;
+    QPushButton* m_selectionDeleteButton;
 
     QString m_activeContact;
 

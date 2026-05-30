@@ -61,13 +61,20 @@ public:
 
     // --- Messages ---
 
-    /** POST /messages/send with Double Ratchet header fields. */
+    /** POST /messages/send with Double Ratchet header fields.
+     *  On success: empty string returned; if outId is non-null, receives the
+     *  server-assigned message UUID (used by deleteMessage). */
     QString sendMessage(const QString& recipient,
                         const QByteArray& ciphertext,
                         const QByteArray& nonce,
                         const QByteArray& ratchetPub,
                         int pn, int n,
-                        const QJsonObject* x3dhHeader);
+                        const QJsonObject* x3dhHeader,
+                        QString* outId = nullptr);
+
+    /** DELETE /messages/<messageId>. Returns empty string on success (204),
+     *  or an error string if the server returned 403/404/other. */
+    QString deleteMessage(const QString& messageId);
 
     /** GET /messages/inbox with optional pagination.
      *  @param limit     max messages to return (server caps at 100)
