@@ -33,6 +33,8 @@
 #include <QtNetwork/QNetworkRequest>
 #include <QtWebSockets/QWebSocket>
 #include <QtWidgets/QHBoxLayout>
+#include <algorithm>
+#include <QtWidgets/QFileDialog>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
@@ -40,11 +42,66 @@
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QSplitter>
-#include <QtWidgets/QTextEdit>
+#include <QtWidgets/QMenu>
+#include <QtWidgets/QStyledItemDelegate>
 #include <QtWidgets/QVBoxLayout>
+#include <QtGui/QMouseEvent>
+#include <QtGui/QPainter>
 #include <QtWidgets/QWidget>
 
 namespace {
+
+static constexpr int kDotsZoneWidth   = 28; // px on the right for the ⋮ hit target
+static constexpr int kCircleZoneWidth = 28; // px on the left for the selection circle hit target
+static constexpr int kCircleRadius    =  7; // outer circle radius (scales with typical row height)
+static constexpr int kDotRadius       =  3; // inner dot radius when selected
+
+class MessageItemDelegate : public QStyledItemDelegate
+{
+    const bool* m_selectionMode;
+public:
+    MessageItemDelegate(const bool* selectionMode, QObject* parent)
+        : QStyledItemDelegate(parent), m_selectionMode(selectionMode) {}
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        QStyledItemDelegate::paint(painter, option, index);
+
+        if (*m_selectionMode) {
+            // Circle centred in the left kCircleZoneWidth strip
+            const int cy = option.rect.center().y();
+            const int cx = option.rect.left() + kCircleZoneWidth / 2;
+            const bool sel = option.state & QStyle::State_Selected;
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing);
+            if (sel) {
+                painter->setBrush(QColor(QStringLiteral("#0084ff")));
+                painter->setPen(Qt::NoPen);
+                painter->drawEllipse(QPoint(cx, cy), kCircleRadius, kCircleRadius);
+                painter->setBrush(Qt::white);
+                painter->setPen(Qt::NoPen);
+                painter->drawEllipse(QPoint(cx, cy), kDotRadius, kDotRadius);
+            } else {
+                painter->setBrush(Qt::NoBrush);
+                painter->setPen(QPen(QColor(QStringLiteral("#bbbbbb")), 1.5));
+                painter->drawEllipse(QPoint(cx, cy), kCircleRadius, kCircleRadius);
+            }
+            painter->restore();
+        } else {
+            if (option.state & (QStyle::State_Selected | QStyle::State_MouseOver)) {
+                painter->save();
+                painter->setPen((option.state & QStyle::State_Selected)
+                                ? option.palette.highlightedText().color()
+                                : option.palette.placeholderText().color());
+                painter->drawText(option.rect.adjusted(0, 0, -8, 0),
+                                  Qt::AlignRight | Qt::AlignVCenter,
+                                  QStringLiteral("⋮"));
+                painter->restore();
+            }
+        }
+    }
+};
 
 QByteArray b64dec(const QJsonValue& v)
 {
@@ -65,19 +122,48 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     , m_reconnectTimer(new QTimer(this))
     , m_reconnectDelayMs(kInitialReconnectMs)
     , m_contactList(new QListWidget(this))
-    , m_thread(new QTextEdit(this))
+    , m_thread(new QListWidget(this))
     , m_compose(new QLineEdit(this))
     , m_sendButton(new QPushButton(tr("Send"), this))
     , m_addContactButton(new QPushButton(tr("Add contact"), this))
     , m_loadOlderButton(new QPushButton(tr("Load older messages"), this))
     , m_topBar(new QLabel(this))
+    , m_composeWidget(new QWidget(this))
+    , m_selectionBar(new QWidget(this))
+    , m_selectionCountLabel(new QLabel(this))
+    , m_selectionDeleteButton(new QPushButton(tr("Delete"), this))
+    , m_selectionForwardButton(new QPushButton(tr("Forward"), this))
+    , m_selectionDownloadButton(new QPushButton(tr("Download"), this))
 {
     setWindowTitle(tr("SecureMsg"));
     resize(900, 600);
 
-    m_thread->setReadOnly(true);
     m_compose->setPlaceholderText(tr("Type a message…"));
     m_loadOlderButton->setVisible(false);
+    m_thread->setItemDelegate(new MessageItemDelegate(&m_selectionMode, m_thread));
+    m_thread->setMouseTracking(true);
+    m_thread->viewport()->setMouseTracking(true);
+    m_thread->viewport()->installEventFilter(this);
+
+    // Compose row (normal mode)
+    auto* composeLayout = new QHBoxLayout(m_composeWidget);
+    composeLayout->setContentsMargins(0, 0, 0, 0);
+    composeLayout->addWidget(m_compose);
+    composeLayout->addWidget(m_sendButton);
+
+    // Selection bar (selection mode) — hidden until user enters selection mode
+    auto* selBarLayout = new QHBoxLayout(m_selectionBar);
+    selBarLayout->setContentsMargins(4, 4, 4, 4);
+    m_selectionDeleteButton->setEnabled(false);
+    m_selectionForwardButton->setEnabled(false);
+    m_selectionDownloadButton->setEnabled(false);
+    auto* cancelSelButton = new QPushButton(tr("Cancel"), this);
+    selBarLayout->addWidget(m_selectionCountLabel, 1);
+    selBarLayout->addWidget(m_selectionForwardButton);
+    selBarLayout->addWidget(m_selectionDownloadButton);
+    selBarLayout->addWidget(m_selectionDeleteButton);
+    selBarLayout->addWidget(cancelSelButton);
+    m_selectionBar->setVisible(false);
 
     auto* left = new QWidget(this);
     auto* leftLayout = new QVBoxLayout(left);
@@ -86,12 +172,10 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
 
     auto* right = new QWidget(this);
     auto* rightLayout = new QVBoxLayout(right);
-    auto* composeRow = new QHBoxLayout;
-    composeRow->addWidget(m_compose);
-    composeRow->addWidget(m_sendButton);
     rightLayout->addWidget(m_loadOlderButton);
     rightLayout->addWidget(m_thread);
-    rightLayout->addLayout(composeRow);
+    rightLayout->addWidget(m_composeWidget);
+    rightLayout->addWidget(m_selectionBar);
 
     auto* split = new QSplitter(this);
     split->addWidget(left);
@@ -105,15 +189,23 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     mainLayout->addWidget(split, 1);
     setCentralWidget(central);
 
-    m_topBar->setText(tr("\xF0\x9F\x94\x92 %1  —  signed in as %2")
+    m_topBar->setText(tr("\xF0\x9F\x90\xBF %1  —  signed in as %2")
                       .arg(m_client->baseHostname(), m_client->username()));
     m_topBar->setStyleSheet(QStringLiteral("padding: 6px; background: #f0f4f8;"));
 
-    connect(m_sendButton,       &QPushButton::clicked,         this, &MainWindow::onSendClicked);
-    connect(m_compose,          &QLineEdit::returnPressed,     this, &MainWindow::onSendClicked);
-    connect(m_addContactButton, &QPushButton::clicked,         this, &MainWindow::onAddContactClicked);
-    connect(m_loadOlderButton,  &QPushButton::clicked,         this, &MainWindow::onLoadOlderClicked);
-    connect(m_contactList,      &QListWidget::itemClicked,     this, &MainWindow::onContactSelected);
+    connect(m_sendButton,            &QPushButton::clicked,         this, &MainWindow::onSendClicked);
+    connect(m_compose,               &QLineEdit::returnPressed,     this, &MainWindow::onSendClicked);
+    m_thread->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_thread, &QListWidget::customContextMenuRequested,
+            this, &MainWindow::onThreadContextMenu);
+    connect(m_thread,                &QListWidget::itemSelectionChanged, this, &MainWindow::onSelectionChanged);
+    connect(m_selectionDeleteButton,   &QPushButton::clicked, this, &MainWindow::onSelectionDeleteClicked);
+    connect(m_selectionForwardButton,  &QPushButton::clicked, this, &MainWindow::onSelectionForwardClicked);
+    connect(m_selectionDownloadButton, &QPushButton::clicked, this, &MainWindow::onSelectionDownloadClicked);
+    connect(cancelSelButton,         &QPushButton::clicked,         this, &MainWindow::exitSelectionMode);
+    connect(m_addContactButton,      &QPushButton::clicked,         this, &MainWindow::onAddContactClicked);
+    connect(m_loadOlderButton,       &QPushButton::clicked,         this, &MainWindow::onLoadOlderClicked);
+    connect(m_contactList,           &QListWidget::itemClicked,     this, &MainWindow::onContactSelected);
 
     // Real-time delivery socket wiring.
     m_reconnectTimer->setSingleShot(true);
@@ -265,19 +357,16 @@ void MainWindow::renderActiveThread()
     m_thread->clear();
     if (m_activeContact.isEmpty()) return;
 
-    m_thread->append(tr("— conversation with %1 —").arg(m_activeContact));
-
     const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
     const int limit = m_renderLimit.value(m_activeContact, kPageSize);
     const int start = qMax(0, all.size() - limit);
 
     for (int i = start; i < all.size(); ++i) {
         const ThreadMessage& m = all[i];
-        if (m.fromMe) {
-            m_thread->append(QStringLiteral("me: ") + m.text);
-        } else {
-            m_thread->append(QStringLiteral("%1: %2").arg(m.sender, m.text));
-        }
+        const QString label = m.fromMe
+            ? QStringLiteral("me: ") + m.text
+            : QStringLiteral("%1: %2").arg(m.sender, m.text);
+        m_thread->addItem(label);
     }
 
     m_loadOlderButton->setVisible(start > 0);
@@ -285,6 +374,7 @@ void MainWindow::renderActiveThread()
 
 void MainWindow::selectContact(const QString& username)
 {
+    if (m_selectionMode) exitSelectionMode();
     m_activeContact = username;
     m_renderLimit.insert(username, kPageSize);
     renderActiveThread();
@@ -368,6 +458,76 @@ void MainWindow::onAddContactClicked()
 // Send
 // ---------------------------------------------------------------------------
 
+bool MainWindow::sendTextToContact(const QString& contact, const QString& text)
+{
+    QString sessionId = m_sessions.value(contact);
+    QString msgId;
+
+    try {
+        if (sessionId.isEmpty()) {
+            // First message to this contact — fetch keybundle, run x3dh_send.
+            QJsonObject bundle;
+            const QString fetchErr = m_client->fetchKeybundle(contact, &bundle);
+            if (!fetchErr.isEmpty()) {
+                QMessageBox::warning(this, tr("Couldn't reach %1").arg(contact), fetchErr);
+                return false;
+            }
+            PeerKeyBundle peer;
+            peer.ikPub   = b64dec(bundle.value(QStringLiteral("ik_x25519")));
+            peer.signPub = b64dec(bundle.value(QStringLiteral("ik_ed25519")));
+            const QJsonObject spk = bundle.value(QStringLiteral("spk")).toObject();
+            peer.spkPub = b64dec(spk.value(QStringLiteral("public_key")));
+            peer.spkSig = b64dec(spk.value(QStringLiteral("signature")));
+            const QJsonValue opkVal = bundle.value(QStringLiteral("opk"));
+            if (opkVal.isObject())
+                peer.opkPub = b64dec(opkVal.toObject().value(QStringLiteral("public_key")));
+
+            const X3dhSendResult r = m_client->daemon()->x3dhSend(contact, text, peer);
+
+            QJsonObject hdr;
+            hdr.insert(QStringLiteral("ik_a"), QString::fromUtf8(r.ikPub.toBase64()));
+            hdr.insert(QStringLiteral("ek_a"), QString::fromUtf8(r.ekPub.toBase64()));
+            if (!r.usedOpkPub.isEmpty())
+                hdr.insert(QStringLiteral("used_opk_pub"),
+                           QString::fromUtf8(r.usedOpkPub.toBase64()));
+
+            const QString err = m_client->sendMessage(contact,
+                                                      r.ciphertext, r.nonce,
+                                                      r.ratchetPub, r.pn, r.n,
+                                                      &hdr, &msgId);
+            if (!err.isEmpty()) {
+                QMessageBox::warning(this, tr("Send failed"), err);
+                return false;
+            }
+            m_sessions.insert(contact, r.sessionId);
+            m_sentFirstMessage.insert(contact, true);
+        } else {
+            const EncryptedMessage enc =
+                m_client->daemon()->encryptMessage(sessionId, text);
+            const QString err = m_client->sendMessage(contact,
+                                                      enc.ciphertext, enc.nonce,
+                                                      enc.ratchetPub, enc.pn, enc.n,
+                                                      nullptr, &msgId);
+            if (!err.isEmpty()) {
+                QMessageBox::warning(this, tr("Send failed"), err);
+                return false;
+            }
+        }
+    } catch (const CryptoDaemonError& e) {
+        QMessageBox::warning(this, tr("Encrypt failed"), e.message());
+        return false;
+    }
+
+    ThreadMessage mine;
+    mine.id     = msgId;
+    mine.fromMe = true;
+    mine.sender = m_client->username();
+    mine.text   = text;
+    mine.ts     = nowIso();
+    appendMessage(contact, mine);
+    return true;
+}
+
 void MainWindow::onSendClicked()
 {
     if (m_activeContact.isEmpty()) {
@@ -378,77 +538,7 @@ void MainWindow::onSendClicked()
     const QString text = m_compose->text();
     if (text.isEmpty()) return;
     m_compose->clear();
-
-    const QString contact = m_activeContact;
-    QString sessionId = m_sessions.value(contact);
-
-    try {
-        if (sessionId.isEmpty()) {
-            // First message — fetch bundle (again, fresh OPK) and run x3dh_send.
-            QJsonObject bundle;
-            const QString fetchErr = m_client->fetchKeybundle(contact, &bundle);
-            if (!fetchErr.isEmpty()) {
-                QMessageBox::warning(this, tr("Couldn't reach %1").arg(contact), fetchErr);
-                return;
-            }
-            PeerKeyBundle peer;
-            peer.ikPub   = b64dec(bundle.value(QStringLiteral("ik_x25519")));
-            peer.signPub = b64dec(bundle.value(QStringLiteral("ik_ed25519")));
-            const QJsonObject spk = bundle.value(QStringLiteral("spk")).toObject();
-            peer.spkPub = b64dec(spk.value(QStringLiteral("public_key")));
-            peer.spkSig = b64dec(spk.value(QStringLiteral("signature")));
-            const QJsonValue opkVal = bundle.value(QStringLiteral("opk"));
-            if (opkVal.isObject()) {
-                peer.opkPub = b64dec(opkVal.toObject().value(QStringLiteral("public_key")));
-            }
-
-            const X3dhSendResult r = m_client->daemon()->x3dhSend(contact, text, peer);
-
-            QJsonObject hdr;
-            hdr.insert(QStringLiteral("ik_a"), QString::fromUtf8(r.ikPub.toBase64()));
-            hdr.insert(QStringLiteral("ek_a"), QString::fromUtf8(r.ekPub.toBase64()));
-            if (!r.usedOpkPub.isEmpty()) {
-                hdr.insert(QStringLiteral("used_opk_pub"),
-                           QString::fromUtf8(r.usedOpkPub.toBase64()));
-            }
-
-            const QString err = m_client->sendMessage(contact,
-                                                      r.ciphertext, r.nonce,
-                                                      r.ratchetPub, r.pn, r.n,
-                                                      &hdr);
-            if (!err.isEmpty()) {
-                QMessageBox::warning(this, tr("Send failed"), err);
-                return;
-            }
-
-            m_sessions.insert(contact, r.sessionId);
-            m_sentFirstMessage.insert(contact, true);
-        } else {
-            const EncryptedMessage enc =
-                m_client->daemon()->encryptMessage(sessionId, text);
-            const QString err = m_client->sendMessage(contact,
-                                                      enc.ciphertext, enc.nonce,
-                                                      enc.ratchetPub, enc.pn, enc.n,
-                                                      nullptr);
-            if (!err.isEmpty()) {
-                QMessageBox::warning(this, tr("Send failed"), err);
-                return;
-            }
-        }
-    } catch (const CryptoDaemonError& e) {
-        QMessageBox::warning(this, tr("Encrypt failed"), e.message());
-        return;
-    }
-
-    // Cache the plaintext locally — we can never recover it from the server
-    // (we don't keep our own send-side message keys).
-    ThreadMessage mine;
-    mine.id     = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    mine.fromMe = true;
-    mine.sender = m_client->username();
-    mine.text   = text;
-    mine.ts     = nowIso();
-    appendMessage(contact, mine);
+    sendTextToContact(m_activeContact, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +626,7 @@ bool MainWindow::processInboundMessage(const QJsonObject& m, bool persist)
         return true;
     } catch (const CryptoDaemonError& e) {
         if (sender == m_activeContact) {
-            m_thread->append(tr("[%1] decrypt failed: %2").arg(sender, e.message()));
+            m_thread->addItem(tr("[%1] decrypt failed: %2").arg(sender, e.message()));
         }
         return false;
     }
@@ -599,13 +689,398 @@ void MainWindow::scheduleReconnect()
 void MainWindow::onWsTextMessage(const QString& text)
 {
     const QJsonObject obj = QJsonDocument::fromJson(text.toUtf8()).object();
-    if (obj.value(QStringLiteral("type")).toString() != QStringLiteral("new_message")) return;
+    const QString type = obj.value(QStringLiteral("type")).toString();
 
-    const QJsonObject m = obj.value(QStringLiteral("message")).toObject();
-    if (processInboundMessage(m, /*persist=*/false)) {
-        // Advance the poll cursor so the fallback poll won't refetch this one.
-        const QString id = m.value(QStringLiteral("id")).toString();
-        if (!id.isEmpty()) m_lastInboxId = id;
-        saveHistory();
+    if (type == QStringLiteral("new_message")) {
+        const QJsonObject m = obj.value(QStringLiteral("message")).toObject();
+        if (processInboundMessage(m, /*persist=*/false)) {
+            const QString id = m.value(QStringLiteral("id")).toString();
+            if (!id.isEmpty()) m_lastInboxId = id;
+            saveHistory();
+        }
+        return;
     }
+
+    if (type == QStringLiteral("message_deleted")) {
+        const QString msgId = obj.value(QStringLiteral("message_id")).toString();
+        if (msgId.isEmpty()) return;
+
+        // Search all threads for this ID and remove it from the local cache.
+        bool changed = false;
+        for (auto it = m_threads.begin(); it != m_threads.end(); ++it) {
+            QList<ThreadMessage>& thread = it.value();
+            for (int i = 0; i < thread.size(); ++i) {
+                if (thread.at(i).id == msgId) {
+                    thread.removeAt(i);
+                    m_seenMessageIds.remove(msgId);
+                    changed = true;
+                    break;
+                }
+            }
+            if (changed) break;
+        }
+        if (changed) {
+            saveHistory();
+            renderActiveThread();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Selection mode
+// ---------------------------------------------------------------------------
+
+void MainWindow::enterSelectionMode(int initialRow)
+{
+    m_selectionMode = true;
+    m_thread->setSelectionMode(QAbstractItemView::MultiSelection);
+    m_thread->clearSelection();
+    if (initialRow >= 0 && initialRow < m_thread->count())
+        m_thread->item(initialRow)->setSelected(true);
+    // indent items right to make room for the circles
+    m_thread->setStyleSheet(QStringLiteral("QListWidget::item { padding-left: 30px; }"));
+    m_composeWidget->setVisible(false);
+    m_selectionBar->setVisible(true);
+    onSelectionChanged();
+    m_thread->viewport()->update();
+}
+
+void MainWindow::exitSelectionMode()
+{
+    m_selectionMode = false;
+    m_thread->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_thread->clearSelection();
+    m_thread->setStyleSheet(QString());
+    m_selectionBar->setVisible(false);
+    m_composeWidget->setVisible(true);
+    m_thread->viewport()->update();
+}
+
+void MainWindow::onSelectionChanged()
+{
+    if (!m_selectionMode) return;
+    const int n = m_thread->selectedItems().count();
+    m_selectionCountLabel->setText(
+        n == 1 ? tr("1 message selected")
+               : tr("%1 messages selected").arg(n));
+    m_selectionDeleteButton->setEnabled(n > 0);
+    m_selectionForwardButton->setEnabled(n > 0);
+    m_selectionDownloadButton->setEnabled(n > 0);
+}
+
+void MainWindow::onSelectionDeleteClicked()
+{
+    if (m_activeContact.isEmpty()) return;
+    const QList<QListWidgetItem*> selected = m_thread->selectedItems();
+    if (selected.isEmpty()) return;
+
+    QList<ThreadMessage>& all = m_threads[m_activeContact];
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+
+    // Validate — all selected messages must have a server UUID
+    QStringList ids;
+    for (const QListWidgetItem* item : selected) {
+        const int idx = start + m_thread->row(item);
+        if (idx < 0 || idx >= all.size()) continue;
+        if (all.at(idx).id.isEmpty()) {
+            QMessageBox::warning(this, tr("Cannot delete"),
+                                 tr("One or more selected messages have no server ID."));
+            return;
+        }
+        ids << all.at(idx).id;
+    }
+    if (ids.isEmpty()) return;
+
+    // Delete from server and local cache one at a time. Use ID-based lookup so
+    // earlier removals don't shift the indices of later ones.
+    for (const QString& id : ids) {
+        const QString err = m_client->deleteMessage(id);
+        if (!err.isEmpty()) {
+            QMessageBox::warning(this, tr("Delete failed"), err);
+            break; // leave any remaining messages in place — user can retry
+        }
+        for (int i = 0; i < all.size(); ++i) {
+            if (all.at(i).id == id) {
+                m_seenMessageIds.remove(id);
+                all.removeAt(i);
+                break;
+            }
+        }
+    }
+
+    saveHistory();
+    exitSelectionMode();
+    renderActiveThread();
+}
+
+// ---------------------------------------------------------------------------
+// Event filter — left-click on the ⋮ zone triggers the context menu
+// ---------------------------------------------------------------------------
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* event)
+{
+    if (obj == m_thread->viewport() && event->type() == QEvent::MouseButtonPress) {
+        const auto* me = static_cast<QMouseEvent*>(event);
+        if (me->button() == Qt::LeftButton) {
+            if (m_selectionMode) {
+                QListWidgetItem* item = m_thread->itemAt(me->pos());
+                if (item) {
+                    const QRect rect = m_thread->visualItemRect(item);
+                    const QRect circleZone(rect.left(), rect.top(),
+                                           kCircleZoneWidth, rect.height());
+                    if (circleZone.contains(me->pos())) {
+                        // Circle hit — let MultiSelection toggle it natively.
+                        return false;
+                    }
+                }
+                // Anywhere outside a circle: clear all and consume.
+                m_thread->clearSelection();
+                return true;
+            } else {
+                // Normal mode: left-click on the ⋮ zone shows the context menu.
+                const QListWidgetItem* item = m_thread->itemAt(me->pos());
+                if (item) {
+                    const QRect rect = m_thread->visualItemRect(item);
+                    const QRect dotsZone(rect.right() - kDotsZoneWidth, rect.top(),
+                                         kDotsZoneWidth, rect.height());
+                    if (dotsZone.contains(me->pos())) {
+                        onThreadContextMenu(me->pos());
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
+}
+
+// ---------------------------------------------------------------------------
+// Delete (right-click anywhere on row, or left-click ⋮)
+// ---------------------------------------------------------------------------
+
+void MainWindow::onThreadContextMenu(const QPoint& pos)
+{
+    if (m_selectionMode) return; // selection bar owns actions in selection mode
+    const QListWidgetItem* item = m_thread->itemAt(pos);
+    if (!item) return;
+    const int row = m_thread->row(item);
+
+    QMenu menu(this);
+    QAction* deleteAction       = menu.addAction(tr("Delete message"));
+    QAction* forwardAction      = menu.addAction(tr("Forward message…"));
+    QAction* saveMessageAction  = menu.addAction(tr("Download message"));
+    QAction* saveConvoAction    = menu.addAction(tr("Download conversation"));
+    menu.addSeparator();
+    QAction* selectAction       = menu.addAction(tr("Select messages…"));
+    const QAction* chosen       = menu.exec(m_thread->mapToGlobal(pos));
+    if (!chosen) return;
+
+    if (chosen == selectAction)      { enterSelectionMode(row); return; }
+    if (chosen == forwardAction)     { onForwardSingle(row);    return; }
+    if (chosen == saveMessageAction) { onDownloadSingle(row);   return; }
+    if (chosen == saveConvoAction) {
+        saveMessagesToFile(m_threads.value(m_activeContact),
+                           QStringLiteral("conversation_with_%1.txt").arg(m_activeContact));
+        return;
+    }
+    if (chosen != deleteAction)  { return; }
+
+    // --- Delete single message ---
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+    const int idx   = start + row;
+    if (idx < 0 || idx >= all.size()) return;
+
+    const ThreadMessage& msg = all.at(idx);
+    if (msg.id.isEmpty()) {
+        QMessageBox::warning(this, tr("Cannot delete"),
+                             tr("This message has no server ID and cannot be deleted remotely."));
+        return;
+    }
+
+    const QString err = m_client->deleteMessage(msg.id);
+    if (!err.isEmpty()) {
+        QMessageBox::warning(this, tr("Delete failed"), err);
+        return;
+    }
+
+    m_seenMessageIds.remove(msg.id);
+    m_threads[m_activeContact].removeAt(idx);
+    saveHistory();
+    renderActiveThread();
+}
+
+// ---------------------------------------------------------------------------
+// Forward
+// ---------------------------------------------------------------------------
+
+QString MainWindow::pickForwardTarget(const QString& excludeUsername)
+{
+    // Build contact list from everyone we have a thread with, minus current contact.
+    QStringList contacts;
+    for (const QString& c : m_threads.keys())
+        if (c != excludeUsername) contacts << c;
+    contacts.sort(Qt::CaseInsensitive);
+
+    bool ok = false;
+    QString target;
+    if (contacts.isEmpty()) {
+        target = QInputDialog::getText(this, tr("Forward to"),
+                                       tr("Username:"), QLineEdit::Normal,
+                                       QString{}, &ok).trimmed();
+    } else {
+        // Editable so the user can also type someone not yet in their contacts.
+        target = QInputDialog::getItem(this, tr("Forward to"),
+                                       tr("Select or type a contact:"),
+                                       contacts, 0, /*editable=*/true, &ok).trimmed();
+    }
+    return ok ? target : QString{};
+}
+
+void MainWindow::onForwardSingle(int row)
+{
+    const QString target = pickForwardTarget(m_activeContact);
+    if (target.isEmpty()) return;
+    if (target == m_client->username()) {
+        QMessageBox::warning(this, tr("Cannot forward"),
+                             tr("You cannot forward a message to yourself."));
+        return;
+    }
+
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+    const int idx   = start + row;
+    if (idx < 0 || idx >= all.size()) return;
+
+    // Client-side re-encryption — decrypt already in m_threads, re-encrypt fresh.
+    const ThreadMessage& msg = all.at(idx);
+    const QString origSender = msg.fromMe ? m_client->username() : msg.sender;
+    const QString fwdText = QChar(0x21AA) + QStringLiteral(" from ")
+                            + origSender + QStringLiteral(": ") + msg.text;
+    if (sendTextToContact(target, fwdText))
+        QMessageBox::information(this, tr("Forwarded"),
+                                 tr("Message forwarded to %1.").arg(target));
+}
+
+void MainWindow::onSelectionForwardClicked()
+{
+    if (m_activeContact.isEmpty()) return;
+    const QList<QListWidgetItem*> selected = m_thread->selectedItems();
+    if (selected.isEmpty()) return;
+
+    const QString target = pickForwardTarget(m_activeContact);
+    if (target.isEmpty()) return;
+    if (target == m_client->username()) {
+        QMessageBox::warning(this, tr("Cannot forward"),
+                             tr("You cannot forward messages to yourself."));
+        return;
+    }
+
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+
+    // The first call may do X3DH (establishing a session); subsequent calls in
+    // this loop use the ratchet session created by the first.
+    int successCount = 0;
+    for (const QListWidgetItem* item : selected) {
+        const int idx = start + m_thread->row(item);
+        if (idx < 0 || idx >= all.size()) continue;
+        const ThreadMessage& msg = all.at(idx);
+        const QString origSender = msg.fromMe ? m_client->username() : msg.sender;
+        const QString fwdText = QChar(0x21AA) + QStringLiteral(" from ")
+                                + origSender + QStringLiteral(": ") + msg.text;
+        if (!sendTextToContact(target, fwdText)) {
+            exitSelectionMode();
+            return;
+        }
+        ++successCount;
+    }
+
+    QMessageBox::information(this, tr("Forwarded"),
+                             tr("%1 message(s) forwarded to %2.").arg(successCount).arg(target));
+    exitSelectionMode();
+}
+
+// ---------------------------------------------------------------------------
+// Download / save to .txt
+// ---------------------------------------------------------------------------
+
+void MainWindow::saveMessagesToFile(const QList<ThreadMessage>& messages,
+                                    const QString& defaultName)
+{
+    if (messages.isEmpty()) return;
+
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Save messages"), defaultName,
+        tr("Text files (*.txt);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        QMessageBox::warning(this, tr("Save failed"),
+                             tr("Could not open file for writing: %1").arg(path));
+        return;
+    }
+
+    QTextStream out(&f);
+    out.setEncoding(QStringConverter::Utf8);
+    for (const ThreadMessage& m : messages) {
+        // Parse ISO-8601 timestamp into a readable local time string.
+        QDateTime dt = QDateTime::fromString(m.ts, Qt::ISODate);
+        const QString ts = dt.isValid()
+            ? dt.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+            : m.ts;
+        const QString sender = m.fromMe ? m_client->username() : m.sender;
+        out << QStringLiteral("[%1] %2: %3\n").arg(ts, sender, m.text);
+    }
+    f.close();
+}
+
+void MainWindow::onDownloadSingle(int row)
+{
+    if (m_activeContact.isEmpty()) return;
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+    const int idx   = start + row;
+    if (idx < 0 || idx >= all.size()) return;
+
+    QList<ThreadMessage> single;
+    single.append(all.at(idx));
+    saveMessagesToFile(single,
+        QStringLiteral("message_%1.txt").arg(
+            QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))));
+}
+
+void MainWindow::onSelectionDownloadClicked()
+{
+    if (m_activeContact.isEmpty()) return;
+    const QList<QListWidgetItem*> selected = m_thread->selectedItems();
+    if (selected.isEmpty()) return;
+
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+
+    QList<int> indices;
+    for (const QListWidgetItem* item : selected) {
+        const int idx = start + m_thread->row(item);
+        if (idx >= 0 && idx < all.size())
+            indices.append(idx);
+    }
+    std::sort(indices.begin(), indices.end());
+
+    QList<ThreadMessage> toSave;
+    for (int idx : indices)
+        toSave.append(all.at(idx));
+
+    saveMessagesToFile(toSave,
+        QStringLiteral("selected_messages_%1_%2.txt")
+            .arg(m_activeContact,
+                 QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))));
+    exitSelectionMode();
 }

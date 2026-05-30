@@ -6,6 +6,8 @@ intentionally so the database representation can evolve independently of the
 public API surface.
 """
 
+from uuid import UUID
+
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -73,6 +75,7 @@ class OPKBundle(BaseModel):
 
 
 class KeyBundleResponse(BaseModel):
+    user_id: UUID
     username: str
     # Long-term identity keys
     ik_x25519: str       # base64 raw X25519 — used in X3DH DH operations

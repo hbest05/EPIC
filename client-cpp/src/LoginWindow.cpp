@@ -73,7 +73,7 @@ void LoginWindow::updateTlsIndicator()
     const TLSVerifier::VerifyResult r =
         TLSVerifier::verify(m_client->baseHostname().toStdString(), 443);
     if (r.valid) {
-        m_tlsLabel->setText(tr("\xF0\x9F\x94\x92  TLS OK — %1 (expires %2)")
+        m_tlsLabel->setText(tr("\xF0\x9F\x90\xBF  TLS OK — %1 (expires %2)")
                             .arg(QString::fromStdString(r.commonName),
                                  QString::fromStdString(r.expiryDate)));
         m_tlsLabel->setStyleSheet(QStringLiteral("color: #1a7f37; font-weight: bold;"));
@@ -120,6 +120,17 @@ void LoginWindow::onRegisterClicked()
     if (user.isEmpty() || email.isEmpty() || pass.isEmpty()) {
         m_statusLabel->setText(tr("Username, email, and password are all required."));
         return;
+    }
+    if (user.size() < 3 || user.size() > 64) {
+        m_statusLabel->setText(tr("Username must be between 3 and 64 characters."));
+        return;
+    }
+    {
+        const int at = email.indexOf('@');
+        if (at < 1 || email.indexOf('.', at + 2) == -1) {
+            m_statusLabel->setText(tr("Enter a valid email address (e.g. name@example.com)."));
+            return;
+        }
     }
     if (pass.size() < 12) {
         m_statusLabel->setText(tr("Password must be at least 12 characters."));
