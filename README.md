@@ -109,9 +109,9 @@ EPIC/
 │   ├── package.json
 │   ├── hardhat.config.js      Sepolia testnet config
 │   ├── contracts/
-│   │   └── MessageDigest.sol  Stores keccak256 hashes on-chain
+│   │   └── MessageDigestRegistry.sol  Stores keccak256 hashes on-chain
 │   ├── scripts/
-│   │   └── deploy.js          Deploy to Sepolia, print contract address
+│   │   └── deployRegistry.js  Deploy to Sepolia, print contract address
 │   └── test/
 │       └── MessageDigest.test.js  Mocha/Chai unit tests
 │
@@ -175,9 +175,17 @@ All migrations are already in `backend/alembic/versions/`. Apply them all with:
 alembic upgrade head
 ```
 
-This runs both migrations in order:
-- `e32ea88cfd28` — initial schema (users, messages, user_keys, message_access)
-- `a1b2c3d4e5f6` — Signal Protocol tables + blockchain registry columns + user_keys constraint fix
+This runs all migrations in order, following the chain below:
+
+```
+e32ea88cfd28  (root — users, messages, user_keys, message_access)
+├── 8662fc698943  — identity keys on users
+├── a1b2c3d4e5f6  — Signal Protocol tables + blockchain registry columns + user_keys constraint fix
+│   └── c8d9e0f1a2b3  — blockchain_batch_index on messages
+│       └── d1e2f3a4b5c6  — forwarding + conversation_revocations table
+├── ee9a6e06e815  — stub (applied directly to DB on main branch)
+└── ffff00000000  — merge head (joins all three branches above)
+```
 
 ---
 
@@ -260,6 +268,9 @@ After deployment, set `CONTRACT_ADDRESS` in `backend/.env`.
 | GET | `/api/messages/{id}` | Cookie | Get a specific message |
 | GET | `/api/blockchain/status/{id}` | Cookie | Check on-chain status |
 | GET | `/api/blockchain/verify/{id}` | Cookie | Tamper-evidence check |
+| GET | `/public/verify/{conversation_id}` | None | Standalone tamper-evidence check — no login required |
+| POST | `/api/conversations/{id}/close` | Cookie + CSRF | Flush remaining batch and record final closing digest on-chain |
+| POST | `/api/conversations/{id}/revoke/{user_id}` | Cookie + CSRF | Revoke a participant's access and record event on-chain |
 
 Full interactive docs: `http://localhost:8000/docs` (Swagger UI)
 

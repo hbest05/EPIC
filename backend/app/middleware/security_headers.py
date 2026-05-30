@@ -39,8 +39,16 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "max-age=31536000; includeSubDomains"
             )
 
-        # CSP — skipped for Swagger/ReDoc which need inline scripts from jsdelivr.net
-        if request.url.path not in _DOCS_PATHS:
+        # CSP — relaxed for static files (verify.html + verify.js need the CDN
+        # and fetch() to 'self'); skipped for Swagger/ReDoc; strict for all else.
+        if request.url.path.startswith("/static/"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; "
+                "script-src 'self' https://cdnjs.cloudflare.com; "
+                "connect-src 'self'; "
+                "style-src 'self' 'unsafe-inline'"
+            )
+        elif request.url.path not in _DOCS_PATHS:
             response.headers["Content-Security-Policy"] = (
                 "default-src 'none'; frame-ancestors 'none'"
             )
