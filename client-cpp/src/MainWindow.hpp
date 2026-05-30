@@ -50,7 +50,9 @@ private slots:
     void onSelectionChanged();
     void onSelectionDeleteClicked();
     void onSelectionForwardClicked();
+    void onSelectionDownloadClicked();
     void onForwardSingle(int row);
+    void onDownloadSingle(int row);
     void enterSelectionMode(int initialRow = -1);
     void exitSelectionMode();
 
@@ -137,10 +139,16 @@ private:
     QLabel*      m_selectionCountLabel;
     QPushButton* m_selectionDeleteButton;
     QPushButton* m_selectionForwardButton;
+    QPushButton* m_selectionDownloadButton;
 
     /** Show a contact-picker dialog; returns chosen username or empty on cancel.
      *  Excludes excludeUsername (the active contact) from the suggestion list. */
     QString pickForwardTarget(const QString& excludeUsername = QString());
+
+    /** Write messages to a .txt file chosen via a save dialog.
+     *  defaultName is suggested in the file chooser. */
+    void saveMessagesToFile(const QList<ThreadMessage>& messages,
+                            const QString& defaultName);
 
     QString m_activeContact;
 

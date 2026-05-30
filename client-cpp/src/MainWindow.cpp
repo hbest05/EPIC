@@ -33,6 +33,8 @@
 #include <QtNetwork/QNetworkRequest>
 #include <QtWebSockets/QWebSocket>
 #include <QtWidgets/QHBoxLayout>
+#include <algorithm>
+#include <QtWidgets/QFileDialog>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
@@ -131,6 +133,7 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     , m_selectionCountLabel(new QLabel(this))
     , m_selectionDeleteButton(new QPushButton(tr("Delete"), this))
     , m_selectionForwardButton(new QPushButton(tr("Forward"), this))
+    , m_selectionDownloadButton(new QPushButton(tr("Download"), this))
 {
     setWindowTitle(tr("SecureMsg"));
     resize(900, 600);
@@ -153,9 +156,11 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     selBarLayout->setContentsMargins(4, 4, 4, 4);
     m_selectionDeleteButton->setEnabled(false);
     m_selectionForwardButton->setEnabled(false);
+    m_selectionDownloadButton->setEnabled(false);
     auto* cancelSelButton = new QPushButton(tr("Cancel"), this);
     selBarLayout->addWidget(m_selectionCountLabel, 1);
     selBarLayout->addWidget(m_selectionForwardButton);
+    selBarLayout->addWidget(m_selectionDownloadButton);
     selBarLayout->addWidget(m_selectionDeleteButton);
     selBarLayout->addWidget(cancelSelButton);
     m_selectionBar->setVisible(false);
@@ -194,8 +199,9 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     connect(m_thread, &QListWidget::customContextMenuRequested,
             this, &MainWindow::onThreadContextMenu);
     connect(m_thread,                &QListWidget::itemSelectionChanged, this, &MainWindow::onSelectionChanged);
-    connect(m_selectionDeleteButton,  &QPushButton::clicked, this, &MainWindow::onSelectionDeleteClicked);
-    connect(m_selectionForwardButton, &QPushButton::clicked, this, &MainWindow::onSelectionForwardClicked);
+    connect(m_selectionDeleteButton,   &QPushButton::clicked, this, &MainWindow::onSelectionDeleteClicked);
+    connect(m_selectionForwardButton,  &QPushButton::clicked, this, &MainWindow::onSelectionForwardClicked);
+    connect(m_selectionDownloadButton, &QPushButton::clicked, this, &MainWindow::onSelectionDownloadClicked);
     connect(cancelSelButton,         &QPushButton::clicked,         this, &MainWindow::exitSelectionMode);
     connect(m_addContactButton,      &QPushButton::clicked,         this, &MainWindow::onAddContactClicked);
     connect(m_loadOlderButton,       &QPushButton::clicked,         this, &MainWindow::onLoadOlderClicked);
@@ -733,6 +739,7 @@ void MainWindow::onSelectionChanged()
                : tr("%1 messages selected").arg(n));
     m_selectionDeleteButton->setEnabled(n > 0);
     m_selectionForwardButton->setEnabled(n > 0);
+    m_selectionDownloadButton->setEnabled(n > 0);
 }
 
 void MainWindow::onSelectionDeleteClicked()
@@ -834,15 +841,23 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
     const int row = m_thread->row(item);
 
     QMenu menu(this);
-    QAction* deleteAction  = menu.addAction(tr("Delete message"));
-    QAction* forwardAction = menu.addAction(tr("Forward message…"));
+    QAction* deleteAction       = menu.addAction(tr("Delete message"));
+    QAction* forwardAction      = menu.addAction(tr("Forward message…"));
+    QAction* saveMessageAction  = menu.addAction(tr("Download message"));
+    QAction* saveConvoAction    = menu.addAction(tr("Download conversation"));
     menu.addSeparator();
-    QAction* selectAction  = menu.addAction(tr("Select messages…"));
-    const QAction* chosen  = menu.exec(m_thread->mapToGlobal(pos));
+    QAction* selectAction       = menu.addAction(tr("Select messages…"));
+    const QAction* chosen       = menu.exec(m_thread->mapToGlobal(pos));
     if (!chosen) return;
 
-    if (chosen == selectAction)  { enterSelectionMode(row); return; }
-    if (chosen == forwardAction) { onForwardSingle(row);    return; }
+    if (chosen == selectAction)      { enterSelectionMode(row); return; }
+    if (chosen == forwardAction)     { onForwardSingle(row);    return; }
+    if (chosen == saveMessageAction) { onDownloadSingle(row);   return; }
+    if (chosen == saveConvoAction) {
+        saveMessagesToFile(m_threads.value(m_activeContact),
+                           QStringLiteral("conversation_with_%1.txt").arg(m_activeContact));
+        return;
+    }
     if (chosen != deleteAction)  { return; }
 
     // --- Delete single message ---
@@ -961,5 +976,85 @@ void MainWindow::onSelectionForwardClicked()
 
     QMessageBox::information(this, tr("Forwarded"),
                              tr("%1 message(s) forwarded to %2.").arg(successCount).arg(target));
+    exitSelectionMode();
+}
+
+// ---------------------------------------------------------------------------
+// Download / save to .txt
+// ---------------------------------------------------------------------------
+
+void MainWindow::saveMessagesToFile(const QList<ThreadMessage>& messages,
+                                    const QString& defaultName)
+{
+    if (messages.isEmpty()) return;
+
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Save messages"), defaultName,
+        tr("Text files (*.txt);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        QMessageBox::warning(this, tr("Save failed"),
+                             tr("Could not open file for writing: %1").arg(path));
+        return;
+    }
+
+    QTextStream out(&f);
+    out.setEncoding(QStringConverter::Utf8);
+    for (const ThreadMessage& m : messages) {
+        // Parse ISO-8601 timestamp into a readable local time string.
+        QDateTime dt = QDateTime::fromString(m.ts, Qt::ISODate);
+        const QString ts = dt.isValid()
+            ? dt.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+            : m.ts;
+        const QString sender = m.fromMe ? m_client->username() : m.sender;
+        out << QStringLiteral("[%1] %2: %3\n").arg(ts, sender, m.text);
+    }
+    f.close();
+}
+
+void MainWindow::onDownloadSingle(int row)
+{
+    if (m_activeContact.isEmpty()) return;
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+    const int idx   = start + row;
+    if (idx < 0 || idx >= all.size()) return;
+
+    QList<ThreadMessage> single;
+    single.append(all.at(idx));
+    saveMessagesToFile(single,
+        QStringLiteral("message_%1.txt").arg(
+            QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))));
+}
+
+void MainWindow::onSelectionDownloadClicked()
+{
+    if (m_activeContact.isEmpty()) return;
+    const QList<QListWidgetItem*> selected = m_thread->selectedItems();
+    if (selected.isEmpty()) return;
+
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+
+    QList<int> indices;
+    for (const QListWidgetItem* item : selected) {
+        const int idx = start + m_thread->row(item);
+        if (idx >= 0 && idx < all.size())
+            indices.append(idx);
+    }
+    std::sort(indices.begin(), indices.end());
+
+    QList<ThreadMessage> toSave;
+    for (int idx : indices)
+        toSave.append(all.at(idx));
+
+    saveMessagesToFile(toSave,
+        QStringLiteral("selected_messages_%1_%2.txt")
+            .arg(m_activeContact,
+                 QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))));
     exitSelectionMode();
 }
