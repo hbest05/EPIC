@@ -379,6 +379,7 @@ async def get_message(
 @router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_message(
     message_id: UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession  = Depends(get_db),
 ):
@@ -391,4 +392,16 @@ async def delete_message(
     if msg.sender_id != current_user.id and msg.recipient_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
+    # Capture before deletion — notify the other party so their client removes
+    # the message from its local plaintext cache immediately.
+    other_user_id = str(msg.recipient_id if msg.sender_id == current_user.id else msg.sender_id)
+    deleted_id    = str(msg.id)
+
     await db.delete(msg)
+    # get_db commits the DELETE before BackgroundTasks run, so the push fires
+    # after the row is gone — no race where the recipient refetches a deleted msg.
+    background_tasks.add_task(
+        manager.send_to_user,
+        other_user_id,
+        {"type": "message_deleted", "message_id": deleted_id},
+    )

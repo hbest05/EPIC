@@ -689,14 +689,40 @@ void MainWindow::scheduleReconnect()
 void MainWindow::onWsTextMessage(const QString& text)
 {
     const QJsonObject obj = QJsonDocument::fromJson(text.toUtf8()).object();
-    if (obj.value(QStringLiteral("type")).toString() != QStringLiteral("new_message")) return;
+    const QString type = obj.value(QStringLiteral("type")).toString();
 
-    const QJsonObject m = obj.value(QStringLiteral("message")).toObject();
-    if (processInboundMessage(m, /*persist=*/false)) {
-        // Advance the poll cursor so the fallback poll won't refetch this one.
-        const QString id = m.value(QStringLiteral("id")).toString();
-        if (!id.isEmpty()) m_lastInboxId = id;
-        saveHistory();
+    if (type == QStringLiteral("new_message")) {
+        const QJsonObject m = obj.value(QStringLiteral("message")).toObject();
+        if (processInboundMessage(m, /*persist=*/false)) {
+            const QString id = m.value(QStringLiteral("id")).toString();
+            if (!id.isEmpty()) m_lastInboxId = id;
+            saveHistory();
+        }
+        return;
+    }
+
+    if (type == QStringLiteral("message_deleted")) {
+        const QString msgId = obj.value(QStringLiteral("message_id")).toString();
+        if (msgId.isEmpty()) return;
+
+        // Search all threads for this ID and remove it from the local cache.
+        bool changed = false;
+        for (auto it = m_threads.begin(); it != m_threads.end(); ++it) {
+            QList<ThreadMessage>& thread = it.value();
+            for (int i = 0; i < thread.size(); ++i) {
+                if (thread.at(i).id == msgId) {
+                    thread.removeAt(i);
+                    m_seenMessageIds.remove(msgId);
+                    changed = true;
+                    break;
+                }
+            }
+            if (changed) break;
+        }
+        if (changed) {
+            saveHistory();
+            renderActiveThread();
+        }
     }
 }
 
