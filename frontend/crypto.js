@@ -14,6 +14,9 @@ const DB_NAME    = "securemsg-keys";
 const DB_VERSION = 1;
 const STORE_NAME = "keys";
 
+// Cap on cached skipped message keys — matches MAX_SKIPPED in double_ratchet.py.
+const MAX_SKIPPED = 100;
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
@@ -441,6 +444,8 @@ export async function ratchetDecrypt(session, fields, _senderIKPub_b64, _myIKPub
 
     // Drain remaining keys from the OLD receive chain up to pn.
     if (session.CKr !== null && session.DHr !== null) {
+      // Reject before the loop: a malicious pn must never spin the chain.
+      if (pn - session.Nr > MAX_SKIPPED) throw new Error("ratchetDecrypt: too many skipped keys");
       while (session.Nr < pn) {
         _evictSkippedIfFull(session);
         const { newCK_b64, MK_b64 } = await chainStep(session.CKr);
@@ -471,6 +476,8 @@ export async function ratchetDecrypt(session, fields, _senderIKPub_b64, _myIKPub
 
   // 3. Skip forward to message n, caching skipped keys.
   if (n < session.Nr) throw new Error("ratchetDecrypt: message older than chain (not cached)");
+  // Reject before the loop: a malicious n must never spin the chain billions of times.
+  if (n - session.Nr > MAX_SKIPPED) throw new Error("ratchetDecrypt: too many skipped keys");
   while (session.Nr < n) {
     _evictSkippedIfFull(session);
     const { newCK_b64, MK_b64 } = await chainStep(session.CKr);
@@ -497,7 +504,7 @@ function _buildAad(ikA_b64, ikB_b64, ratchetPub_b64, pn, n) {
 
 function _evictSkippedIfFull(session) {
   const keys = Object.keys(session.skipped);
-  if (keys.length >= 100) delete session.skipped[keys[0]];
+  if (keys.length >= MAX_SKIPPED) delete session.skipped[keys[0]];
 }
 
 async function _openMessage(session, MK_b64, ciphertext_b64, nonce_b64, ratchet_pub_b64, pn, n) {
