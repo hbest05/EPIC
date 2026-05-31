@@ -282,6 +282,7 @@ async def get_inbox(
         select(Message, User.username)
         .join(User, User.id == Message.sender_id)
         .where(Message.recipient_id == current_user.id)
+        .where(Message.deleted_for_recipient == False)  # noqa: E712
     )
 
     if with_user is not None:
@@ -388,13 +389,13 @@ async def delete_message(
     if msg is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
-    # Only the sender or recipient may delete a message
-    if msg.sender_id != current_user.id and msg.recipient_id != current_user.id:
+    # Only the sender may delete a message
+    if msg.sender_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
-    # Capture before deletion — notify the other party so their client removes
+    # Capture before deletion — notify the recipient so their client removes
     # the message from its local plaintext cache immediately.
-    other_user_id = str(msg.recipient_id if msg.sender_id == current_user.id else msg.sender_id)
+    other_user_id = str(msg.recipient_id)
     deleted_id    = str(msg.id)
 
     await db.delete(msg)
@@ -405,3 +406,41 @@ async def delete_message(
         other_user_id,
         {"type": "message_deleted", "message_id": deleted_id},
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /{message_id}/revoke
+# ---------------------------------------------------------------------------
+
+@router.post("/{message_id}/revoke")
+async def revoke_message(
+    message_id: UUID,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession  = Depends(get_db),
+):
+    """Hide a single message from its recipient ("delete for recipient only").
+
+    Only the original sender may revoke; the row is kept so the sender still
+    sees it, but get_inbox filters out deleted_for_recipient messages.
+    """
+    result = await db.execute(select(Message).where(Message.id == message_id))
+    msg = result.scalar_one_or_none()
+    if msg is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    if msg.sender_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the sender may revoke this message.",
+        )
+
+    msg.deleted_for_recipient = True
+    # get_db() commits before BackgroundTasks run, so the push fires after the
+    # flag is persisted — the recipient drops it from their local cache.
+    background_tasks.add_task(
+        manager.send_to_user,
+        str(msg.recipient_id),
+        {"type": "message_deleted", "message_id": str(msg.id)},
+    )
+    return {"revoked": True}

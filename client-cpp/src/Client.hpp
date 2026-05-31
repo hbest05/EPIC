@@ -59,6 +59,11 @@ public:
     /** GET /auth/user/<username>/keybundle. */
     QString fetchKeybundle(const QString& username, QJsonObject* out);
 
+    /** Revoke a single message for its recipient ("delete for recipient only")
+     *  via POST /messages/<messageId>/revoke. Only the sender may do this.
+     *  @returns empty string on success, error message on failure. */
+    QString revokeAccess(const QString& messageId);
+
     // --- Messages ---
 
     /** POST /messages/send with Double Ratchet header fields.

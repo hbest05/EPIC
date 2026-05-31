@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID, BYTEA
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -36,6 +36,7 @@ class Message(Base):
     blockchain_record_index = Column(Integer, nullable=True)
     blockchain_batch_index = Column(Integer, nullable=True)
     forwarded_from_id = Column(UUID(as_uuid=True), nullable=True)
+    deleted_for_recipient = Column(Boolean, nullable=False, default=False, server_default=func.false())
 
     # Double Ratchet header fields — populated by the sending ratchet service
     ratchet_public_key = Column(String(512), nullable=True)        # sender's DH ratchet key (base64)

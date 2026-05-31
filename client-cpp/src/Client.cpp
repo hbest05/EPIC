@@ -31,8 +31,6 @@ size_t writeToByteArray(char* ptr, size_t size, size_t nmemb, void* userdata)
     return size * nmemb;
 }
 
-QString utf8(const QByteArray& b) { return QString::fromUtf8(b); }
-
 } // namespace
 
 Client::Client(std::shared_ptr<CryptoDaemonClient> daemon)
@@ -310,6 +308,19 @@ QString Client::fetchKeybundle(const QString& username, QJsonObject* out)
     }
     if (out) *out = QJsonDocument::fromJson(resp).object();
     return {};
+}
+
+QString Client::revokeAccess(const QString& messageId)
+{
+    const QByteArray resp = httpRequest(
+        QStringLiteral("POST"),
+        QStringLiteral("/api/messages/") + messageId + QStringLiteral("/revoke"),
+        QByteArrayLiteral("{}"));
+    if (m_lastStatus == 200 || m_lastStatus == 201) return {};
+    if (!m_lastError.isEmpty()) return m_lastError;
+    const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+    return obj.value(QStringLiteral("detail")).toString(
+        QStringLiteral("revoke failed (HTTP %1)").arg(m_lastStatus));
 }
 
 QString Client::sendMessage(const QString& recipient,

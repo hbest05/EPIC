@@ -43,6 +43,7 @@ private slots:
     void onSendClicked();
     void onAddContactClicked();
     void onThreadContextMenu(const QPoint& pos);
+    void onRevokeAccess(int row);
     void onContactSelected(QListWidgetItem* item);
     void onLoadOlderClicked();
     void pollInbox();
