@@ -62,11 +62,10 @@ public:
     /** GET /auth/me — current user's profile ({id, username}). */
     QString fetchMe(QJsonObject* out);
 
-    /** Revoke a contact's access to the conversation we share with them and
-     *  record it on the blockchain via
-     *  POST /conversations/<conversation_id>/revoke/<user_id>.
+    /** Revoke a single message for its recipient ("delete for recipient only")
+     *  via POST /messages/<messageId>/revoke. Only the sender may do this.
      *  @returns empty string on success, error message on failure. */
-    QString revokeAccess(const QString& contactUsername);
+    QString revokeAccess(const QString& messageId);
 
     // --- Messages ---
 

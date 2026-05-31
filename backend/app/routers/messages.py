@@ -16,12 +16,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import String, cast, func, select, tuple_
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.message import Message
-from app.models.revocation import ConversationRevocation
 from app.models.user import User
 from app.schemas.message import (
     MessageResponse,
@@ -57,27 +56,6 @@ def _conversation_id(user_a_id, user_b_id) -> str:
     """
     a, b = str(user_a_id), str(user_b_id)
     return f"{min(a, b)}_{max(a, b)}"
-
-
-def _not_revoked_clause(current_user_id, other_party_col):
-    """SQL predicate: the current user's access to the conversation with
-    `other_party_col` has NOT been revoked.
-
-    Mirrors _conversation_id() in SQL — least/greatest over the text form of the
-    two UUIDs gives the same lexicographic ordering as Python's min/max, since
-    Postgres uuid::text is canonical lowercase.
-    """
-    me = str(current_user_id)
-    other = cast(other_party_col, String)
-    conv_expr = func.concat(func.least(other, me), "_", func.greatest(other, me))
-    return ~(
-        select(ConversationRevocation.id)
-        .where(
-            ConversationRevocation.revoked_user_id == current_user_id,
-            ConversationRevocation.conversation_id == conv_expr,
-        )
-        .exists()
-    )
 
 
 def _to_response(
@@ -304,7 +282,7 @@ async def get_inbox(
         select(Message, User.username)
         .join(User, User.id == Message.sender_id)
         .where(Message.recipient_id == current_user.id)
-        .where(_not_revoked_clause(current_user.id, Message.sender_id))
+        .where(Message.deleted_for_recipient == False)  # noqa: E712
     )
 
     if with_user is not None:
@@ -346,7 +324,6 @@ async def get_sent(
         select(Message, User.username)
         .join(User, User.id == Message.recipient_id)
         .where(Message.sender_id == current_user.id)
-        .where(_not_revoked_clause(current_user.id, Message.recipient_id))
     )
 
     if with_user is not None:
@@ -429,3 +406,34 @@ async def delete_message(
         other_user_id,
         {"type": "message_deleted", "message_id": deleted_id},
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /{message_id}/revoke
+# ---------------------------------------------------------------------------
+
+@router.post("/{message_id}/revoke")
+async def revoke_message(
+    message_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession  = Depends(get_db),
+):
+    """Hide a single message from its recipient ("delete for recipient only").
+
+    Only the original sender may revoke; the row is kept so the sender still
+    sees it, but get_inbox filters out deleted_for_recipient messages.
+    """
+    result = await db.execute(select(Message).where(Message.id == message_id))
+    msg = result.scalar_one_or_none()
+    if msg is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    if msg.sender_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the sender may revoke this message.",
+        )
+
+    msg.deleted_for_recipient = True
+    # get_db() commits on success.
+    return {"revoked": True}

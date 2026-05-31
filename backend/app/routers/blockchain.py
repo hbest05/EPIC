@@ -22,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
 from app.models.message import Message
-from app.models.revocation import ConversationRevocation
 from app.schemas.message import BlockchainVerifyResponse, RevokeAccessResponse
 from app.services.auth_service import get_current_user
 from app.services.rate_limit import limiter
@@ -253,82 +252,3 @@ async def close_conversation(
         )
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# POST /api/conversations/{conversation_id}/revoke/{user_id}  (Tier 2)
-# ---------------------------------------------------------------------------
-
-@conversations_router.post("/{conversation_id}/revoke/{user_id}", response_model=RevokeAccessResponse)
-async def revoke_access(
-    conversation_id: str,
-    user_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Revoke a participant's access to a conversation and record the event
-    on-chain via Tier 2 (record_event_triggered_digest, awaited directly).
-
-    The revocation is persisted to DB regardless of whether blockchain is
-    configured — tx_hash will be null if Sepolia is unreachable.
-    """
-    # 1. Validate conversation_id format and extract participant UUIDs
-    parts = conversation_id.split("_", 1)
-    if len(parts) != 2:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="conversation_id must be in the format {uuid1}_{uuid2}",
-        )
-    try:
-        uid_a = uuid.UUID(parts[0])
-        uid_b = uuid.UUID(parts[1])
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="conversation_id must be in the format {uuid1}_{uuid2}",
-        )
-
-    # 2. Caller must be a participant
-    if current_user.id not in (uid_a, uid_b):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not a participant in this conversation.",
-        )
-
-    # 3. Target must be a participant
-    if user_id not in (uid_a, uid_b):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The specified user is not a participant in this conversation.",
-        )
-
-    # 4. Prevent self-revocation
-    if user_id == current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot revoke your own access.",
-        )
-
-    # 5. Persist revocation — dedicated session with explicit commit so the row
-    #    is visible to record_event_triggered_digest's own session.
-    async with AsyncSessionLocal() as session:
-        revocation = ConversationRevocation(
-            conversation_id=conversation_id,
-            revoked_user_id=user_id,
-            revoked_by_id=current_user.id,
-        )
-        session.add(revocation)
-        await session.flush()
-        await session.refresh(revocation)   # populate server-side revoked_at
-        revoked_at = revocation.revoked_at
-        await session.commit()
-
-    # Revocation is persisted; on-chain recording is intentionally skipped here,
-    # so tx_hash/etherscan_url are always None.
-    return RevokeAccessResponse(
-        revoked_user_id=user_id,
-        conversation_id=conversation_id,
-        tx_hash=None,
-        etherscan_url=None,
-        revoked_at=revoked_at,
-    )

@@ -327,30 +327,11 @@ QString Client::fetchMe(QJsonObject* out)
     return {};
 }
 
-QString Client::revokeAccess(const QString& contactUsername)
+QString Client::revokeAccess(const QString& messageId)
 {
-    // 1. Our own UUID.
-    QJsonObject me;
-    if (const QString err = fetchMe(&me); !err.isEmpty()) return err;
-    const QString myId = me.value(QStringLiteral("id")).toString();
-    if (myId.isEmpty()) return QStringLiteral("could not determine your own user id");
-
-    // 2. The contact's UUID, pulled from their key bundle.
-    QJsonObject bundle;
-    if (const QString err = fetchKeybundle(contactUsername, &bundle); !err.isEmpty()) return err;
-    const QString targetId = bundle.value(QStringLiteral("user_id")).toString();
-    if (targetId.isEmpty()) return QStringLiteral("could not determine %1's user id").arg(contactUsername);
-
-    // 3. conversation_id = the two UUIDs sorted lexicographically, joined by '_'.
-    const QString conversationId = (myId < targetId)
-        ? myId + QStringLiteral("_") + targetId
-        : targetId + QStringLiteral("_") + myId;
-
-    // 4. Record the revocation on the blockchain.
     const QByteArray resp = httpRequest(
         QStringLiteral("POST"),
-        QStringLiteral("/api/conversations/") + conversationId +
-            QStringLiteral("/revoke/") + targetId,
+        QStringLiteral("/api/messages/") + messageId + QStringLiteral("/revoke"),
         QByteArrayLiteral("{}"));
     if (m_lastStatus == 200 || m_lastStatus == 201) return {};
     if (!m_lastError.isEmpty()) return m_lastError;

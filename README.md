@@ -182,9 +182,11 @@ e32ea88cfd28  (root — users, messages, user_keys, message_access)
 ├── 8662fc698943  — identity keys on users
 ├── a1b2c3d4e5f6  — Signal Protocol tables + blockchain registry columns + user_keys constraint fix
 │   └── c8d9e0f1a2b3  — blockchain_batch_index on messages
-│       └── d1e2f3a4b5c6  — forwarding + conversation_revocations table
+│       └── d1e2f3a4b5c6  — message forwarding support
 ├── ee9a6e06e815  — stub (applied directly to DB on main branch)
 └── ffff00000000  — merge head (joins all three branches above)
+    └── a7b8c9d0e1f2  — one-time prekey key_id widened to bigint
+        └── f4a5b6c7d8e9  — messages.deleted_for_recipient (delete-for-recipient)
 ```
 
 ---

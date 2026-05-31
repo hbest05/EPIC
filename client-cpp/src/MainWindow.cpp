@@ -873,12 +873,21 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
     QAction* saveConvoAction    = menu.addAction(tr("Download conversation"));
     menu.addSeparator();
     QAction* selectAction       = menu.addAction(tr("Select messages…"));
-    QAction* revokeAction       = m_activeContact.isEmpty() ? nullptr
-                                  : menu.addAction(tr("Revoke access…"));
+
+    // "Revoke access…" only applies to a message we forwarded to this contact,
+    // identified by the leading forward-arrow marker (↪) on its text.
+    const QList<ThreadMessage>& menuMsgs = m_threads.value(m_activeContact);
+    const int menuLimit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int menuStart = qMax(0, menuMsgs.size() - menuLimit);
+    const int menuIdx   = menuStart + row;
+    const bool isForwarded = menuIdx >= 0 && menuIdx < menuMsgs.size()
+                             && menuMsgs.at(menuIdx).text.startsWith(QChar(0x21AA));
+    QAction* revokeAction       = isForwarded ? menu.addAction(tr("Revoke access…")) : nullptr;
+
     const QAction* chosen       = menu.exec(m_thread->mapToGlobal(pos));
     if (!chosen) return;
 
-    if (chosen == revokeAction)      { onRevokeAccess();        return; }
+    if (chosen == revokeAction)      { onRevokeAccess(row);     return; }
     if (chosen == selectAction)      { enterSelectionMode(row); return; }
     if (chosen == forwardAction)     { onForwardSingle(row);    return; }
     if (chosen == saveMessageAction) { onDownloadSingle(row);   return; }
@@ -915,26 +924,41 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
     renderActiveThread();
 }
 
-void MainWindow::onRevokeAccess()
+void MainWindow::onRevokeAccess(int row)
 {
-    if (m_activeContact.isEmpty()) return;
+    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
+    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
+    const int start = qMax(0, all.size() - limit);
+    const int idx   = start + row;
+    if (idx < 0 || idx >= all.size()) return;
+
+    const QString msgId = all.at(idx).id;
+    if (msgId.isEmpty()) {
+        QMessageBox::warning(this, tr("Cannot revoke"),
+                             tr("This message has no server ID and cannot be revoked."));
+        return;
+    }
 
     const auto confirm = QMessageBox::question(
         this, tr("Revoke access"),
-        tr("Revoke %1's access to this conversation? "
-           "They will no longer be able to view messages.").arg(m_activeContact),
+        tr("Revoke the recipient's access to this forwarded message? "
+           "They will no longer be able to view it."),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (confirm != QMessageBox::Yes) return;
 
-    const QString err = m_client->revokeAccess(m_activeContact);
+    const QString err = m_client->revokeAccess(msgId);
     if (!err.isEmpty()) {
         QMessageBox::warning(this, tr("Revoke failed"), err);
         return;
     }
 
+    m_seenMessageIds.remove(msgId);
+    m_threads[m_activeContact].removeAt(idx);
+    saveHistory();
+    renderActiveThread();
+
     QMessageBox::information(this, tr("Access revoked"),
-                             tr("%1's access to this conversation has been revoked.")
-                                 .arg(m_activeContact));
+                             tr("Access revoked. The recipient can no longer see this message."));
 }
 
 // ---------------------------------------------------------------------------
