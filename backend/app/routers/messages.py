@@ -389,13 +389,13 @@ async def delete_message(
     if msg is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
-    # Only the sender or recipient may delete a message
-    if msg.sender_id != current_user.id and msg.recipient_id != current_user.id:
+    # Only the sender may delete a message
+    if msg.sender_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
-    # Capture before deletion — notify the other party so their client removes
+    # Capture before deletion — notify the recipient so their client removes
     # the message from its local plaintext cache immediately.
-    other_user_id = str(msg.recipient_id if msg.sender_id == current_user.id else msg.sender_id)
+    other_user_id = str(msg.recipient_id)
     deleted_id    = str(msg.id)
 
     await db.delete(msg)
