@@ -952,11 +952,8 @@ void MainWindow::onRevokeAccess(int row)
         return;
     }
 
-    m_seenMessageIds.remove(msgId);
-    m_threads[m_activeContact].removeAt(idx);
-    saveHistory();
-    renderActiveThread();
-
+    // The message stays visible on our (sender) side; only the recipient's
+    // client removes it, via the message_deleted WebSocket push.
     QMessageBox::information(this, tr("Access revoked"),
                              tr("Access revoked. The recipient can no longer see this message."));
 }
