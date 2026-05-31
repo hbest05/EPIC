@@ -67,7 +67,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Redis — blockchain write queue (streams)
+  # Redis — blockchain write queue
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine

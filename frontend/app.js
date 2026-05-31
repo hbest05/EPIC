@@ -11,9 +11,7 @@ import {
   generateKeyPair,
   generateSigningPair,
   exportPublicKey,
-  importPublicKey,
   signMessage,
-  verifySignature,
   storePrivateKey,
   loadPrivateKey,
   generateOPKs,
@@ -27,8 +25,8 @@ import {
   loadSession,
 } from "./crypto.js";
 
-const API_BASE        = "http://localhost:8000/api";
-const POLL_INTERVAL_MS = 5000; // TODO: replace with WebSocket
+const API_BASE         = "http://localhost:8000/api";
+const POLL_INTERVAL_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Application state
@@ -38,7 +36,7 @@ let currentUser    = null;        // { id, username }
 let myPrivateKey   = null;        // X25519 CryptoKey (loaded from IndexedDB)
 let mySigningKey   = null;        // Ed25519 CryptoKey (loaded from IndexedDB)
 let myPublicKeyB64 = null;        // our X25519 IK public key, base64
-const contacts     = new Map();   // username → KeyBundleResponse
+const contacts     = new Map();   // username → KeyBundleResponse (session cache only)
 const sessions     = new Map();   // username → session object (mirrors IndexedDB)
 const seenMessageIds = new Set(); // prevents re-processing fetched messages
 let activeRecipient = null;
@@ -64,10 +62,91 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
+const EMAIL_RE    = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function setFieldError(inputId, errorId, message) {
+  const input = document.getElementById(inputId);
+  const span  = document.getElementById(errorId);
+  if (!input || !span) return;
+  span.textContent = message;
+  if (message) input.classList.add("invalid");
+  else         input.classList.remove("invalid");
+}
+
+function clearFormError(errorId) {
+  const el = document.getElementById(errorId);
+  if (el) el.textContent = "";
+}
+
+function setFormError(errorId, message) {
+  const el = document.getElementById(errorId);
+  if (el) el.textContent = message;
+}
+
+function validateLoginFields() {
+  const username = document.getElementById("login-username").value.trim();
+  const password = document.getElementById("login-password").value;
+  let valid = true;
+
+  if (!username) {
+    setFieldError("login-username", "login-username-error", "Username is required.");
+    valid = false;
+  } else {
+    setFieldError("login-username", "login-username-error", "");
+  }
+
+  if (!password) {
+    setFieldError("login-password", "login-password-error", "Password is required.");
+    valid = false;
+  } else {
+    setFieldError("login-password", "login-password-error", "");
+  }
+
+  return valid;
+}
+
+function validateRegisterFields() {
+  const username = document.getElementById("reg-username").value.trim();
+  const email    = document.getElementById("reg-email").value.trim();
+  const password = document.getElementById("reg-password").value;
+  let valid = true;
+
+  if (!USERNAME_RE.test(username)) {
+    setFieldError("reg-username", "reg-username-error", "3–20 chars, letters/numbers/underscore only.");
+    valid = false;
+  } else {
+    setFieldError("reg-username", "reg-username-error", "");
+  }
+
+  if (!EMAIL_RE.test(email)) {
+    setFieldError("reg-email", "reg-email-error", "Enter a valid email address.");
+    valid = false;
+  } else {
+    setFieldError("reg-email", "reg-email-error", "");
+  }
+
+  if (password.length < 12) {
+    setFieldError("reg-password", "reg-password-error", "Password must be at least 12 characters.");
+    valid = false;
+  } else {
+    setFieldError("reg-password", "reg-password-error", "");
+  }
+
+  return valid;
+}
+
+// ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
 
 async function register() {
+  clearFormError("reg-form-error");
+  if (!validateRegisterFields()) return;
+
   const username = document.getElementById("reg-username").value.trim();
   const email    = document.getElementById("reg-email").value.trim();
   const password = document.getElementById("reg-password").value;
@@ -77,7 +156,7 @@ async function register() {
     const { publicKey: x25519Pub, privateKey: x25519Priv } = await generateKeyPair();
     const { publicKey: ed25519Pub, privateKey: ed25519Priv } = await generateSigningPair();
 
-    const x25519PubB64 = await exportPublicKey(x25519Pub);
+    const x25519PubB64  = await exportPublicKey(x25519Pub);
     const ed25519PubB64 = await exportPublicKey(ed25519Pub);
 
     await apiFetch("/auth/register", {
@@ -86,8 +165,9 @@ async function register() {
         username,
         email,
         password,
-        x25519_public_key: x25519PubB64,
+        x25519_public_key:  x25519PubB64,
         ed25519_public_key: ed25519PubB64,
+        client_type:        "web",
       }),
     });
 
@@ -102,32 +182,28 @@ async function register() {
       true,
       ["deriveBits"],
     );
-    const spkPubB64 = await exportPublicKey(spkKP.publicKey);
-
-    // Sign raw SPK pub bytes with Ed25519 IK.
+    const spkPubB64   = await exportPublicKey(spkKP.publicKey);
     const spkPubBytes = Uint8Array.from(atob(spkPubB64), c => c.charCodeAt(0));
     const spkSigB64   = await signMessage(spkPubBytes.buffer, ed25519Priv);
 
-    // Store SPK private CryptoKey and its public key b64 for use in X3DH receive.
-    await storePrivateKey("spk",        spkKP.privateKey);
+    await storePrivateKey("spk",         spkKP.privateKey);
     await storePrivateKey("spk_pub_b64", spkPubB64);
 
     // Generate 10 OPKs (private keys stored in IndexedDB by generateOPKs).
-    const opks = await generateOPKs(10);
-
-    // Upload prekeys.
+    const opks  = await generateOPKs(10);
     const keyId = Math.floor(Date.now() / 1000);
+
     await apiFetch("/auth/prekeys", {
       method: "POST",
       body: JSON.stringify({
         signed_prekey: {
-          key_id:    keyId,
+          key_id:     keyId,
           public_key: spkPubB64,
           signature:  spkSigB64,
         },
         one_time_prekeys: await Promise.all(
           opks.map(async (kp, i) => ({
-            key_id:    keyId * 100 + i,
+            key_id:     keyId * 100 + i,
             public_key: await exportPublicKey(kp.publicKey),
           })),
         ),
@@ -137,26 +213,29 @@ async function register() {
     // Auto-login.
     currentUser = await apiFetch("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, client_type: "web" }),
     });
-    myPrivateKey   = await loadPrivateKey("x25519");
-    mySigningKey   = await loadPrivateKey("ed25519");
+    myPrivateKey   = x25519Priv;
+    mySigningKey   = ed25519Priv;
     myPublicKeyB64 = x25519PubB64;
     showApp();
     startInboxPoller();
   } catch (err) {
-    alert(err.message);
+    setFormError("reg-form-error", err.message);
   }
 }
 
 async function login() {
+  clearFormError("login-form-error");
+  if (!validateLoginFields()) return;
+
   const username = document.getElementById("login-username").value.trim();
   const password = document.getElementById("login-password").value;
 
   try {
     currentUser    = await apiFetch("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, client_type: "web" }),
     });
     myPrivateKey   = await loadPrivateKey("x25519");
     mySigningKey   = await loadPrivateKey("ed25519");
@@ -164,7 +243,7 @@ async function login() {
     showApp();
     startInboxPoller();
   } catch (err) {
-    alert(err.message);
+    setFormError("login-form-error", err.message);
   }
 }
 
@@ -281,7 +360,6 @@ async function sendMessage() {
       const { SK, EK_A_pub_b64, usedOPKPub_b64 } = await x3dhSend(myPrivateKey, bundle);
 
       session = await initSessionAsSender(SK, bundle.spk.public_key, myPublicKeyB64, bundle.ik_x25519);
-      // Store ephemeral key so the first message can carry the X3DH header.
       session.x3dh_ek_pub  = EK_A_pub_b64;
       session.x3dh_opk_pub = usedOPKPub_b64;
     }
@@ -322,6 +400,10 @@ async function sendMessage() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Inbox polling
+// ---------------------------------------------------------------------------
+
 async function fetchInbox() {
   try {
     const messages = await apiFetch("/messages/inbox");
@@ -347,8 +429,6 @@ async function fetchInbox() {
         const plaintext = await ratchetDecrypt(
           session,
           { ciphertext: msg.ciphertext, nonce: msg.nonce, ratchet_pub: msg.ratchet_pub, pn: msg.pn, n: msg.n },
-          session.ik_a,
-          session.ik_b,
         );
 
         sessions.set(sender, session);
@@ -363,10 +443,6 @@ async function fetchInbox() {
     console.error("fetchInbox: inbox fetch failed", err);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Inbox polling
-// ---------------------------------------------------------------------------
 
 function startInboxPoller() {
   inboxPoller = setInterval(fetchInbox, POLL_INTERVAL_MS);
@@ -409,20 +485,35 @@ function escapeHtml(str) {
 }
 
 function attachEventListeners() {
-  document.getElementById("btn-login").addEventListener("click", login);
-  document.getElementById("btn-register").addEventListener("click", register);
-  document.getElementById("btn-logout").addEventListener("click", logout);
-  document.getElementById("btn-send").addEventListener("click", sendMessage);
-  document.getElementById("show-register").addEventListener("click", () => {
+  document.getElementById("btn-login")?.addEventListener("click", login);
+  document.getElementById("btn-register")?.addEventListener("click", register);
+  document.getElementById("btn-logout")?.addEventListener("click", logout);
+  document.getElementById("btn-send")?.addEventListener("click", sendMessage);
+
+  // Auth form tab navigation
+  document.getElementById("show-register")?.addEventListener("click", () => {
     document.getElementById("login-form").style.display    = "none";
     document.getElementById("register-form").style.display = "block";
   });
-  document.getElementById("show-login").addEventListener("click", () => {
+  document.getElementById("show-login")?.addEventListener("click", () => {
     document.getElementById("register-form").style.display = "none";
     document.getElementById("login-form").style.display    = "block";
   });
 
-  document.getElementById("btn-add-contact").addEventListener("click", async () => {
+  // Clear field errors as the user types
+  [
+    ["login-username", "login-username-error"],
+    ["login-password", "login-password-error"],
+    ["reg-username",   "reg-username-error"],
+    ["reg-email",      "reg-email-error"],
+    ["reg-password",   "reg-password-error"],
+  ].forEach(([inputId, errorId]) => {
+    document.getElementById(inputId)?.addEventListener("input", () =>
+      setFieldError(inputId, errorId, "")
+    );
+  });
+
+  document.getElementById("btn-add-contact")?.addEventListener("click", async () => {
     const input    = document.getElementById("new-contact");
     const username = input.value.trim();
     if (!username) return;
@@ -436,7 +527,7 @@ function attachEventListeners() {
   });
 
   // Allow Send on Enter (Shift+Enter for newline).
-  document.getElementById("plaintext-input").addEventListener("keydown", (e) => {
+  document.getElementById("plaintext-input")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
 }
@@ -444,7 +535,6 @@ function attachEventListeners() {
 function addContactToSidebar(username) {
   const list = document.getElementById("contact-list");
   if (!list) return;
-  // Avoid duplicates.
   if (list.querySelector(`[data-username="${CSS.escape(username)}"]`)) return;
   const li = document.createElement("li");
   li.dataset.username = username;

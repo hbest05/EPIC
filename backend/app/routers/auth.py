@@ -22,6 +22,7 @@ from app.schemas.auth import (
     SPKBundle,
     UploadPrekeysRequest,
     UserPublicProfile,
+    _VALID_CLIENT_TYPES,
 )
 from app.services.auth_service import (
     create_access_token,
@@ -49,6 +50,12 @@ _COOKIE_MAX_AGE = settings.jwt_access_token_expire_minutes * 60
 @router.post("/register", response_model=UserPublicProfile, status_code=status.HTTP_201_CREATED)
 @limiter.limit("5/minute")
 async def register(request: Request, body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    if body.client_type not in _VALID_CLIENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"client_type must be one of: {', '.join(sorted(_VALID_CLIENT_TYPES))}",
+        )
+
     # Uniqueness checks
     taken = await db.execute(select(User).where(User.username == body.username))
     if taken.scalar_one_or_none():
@@ -73,6 +80,7 @@ async def register(request: Request, body: RegisterRequest, db: AsyncSession = D
         username=body.username,
         email=body.email,
         password_hash=hash_password(body.password),
+        client_type=body.client_type,
     )
     db.add(user)
     await db.flush()  # get user.id before inserting UserKey rows
@@ -100,6 +108,12 @@ async def register(request: Request, body: RegisterRequest, db: AsyncSession = D
 async def login(request: Request, body: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
     ip = request.client.host
 
+    if body.client_type not in _VALID_CLIENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"client_type must be one of: {', '.join(sorted(_VALID_CLIENT_TYPES))}",
+        )
+
     # Reject immediately if this IP has hit the failure threshold — no DB work needed
     if await get_auth_failure_count(ip) >= AUTH_MAX_FAILURES:
         raise HTTPException(
@@ -122,6 +136,12 @@ async def login(request: Request, body: LoginRequest, response: Response, db: As
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if not user.is_active:
+        await record_auth_failure(ip)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    # Enforce client_type — accounts are bound to the client that created them.
+    # Legacy accounts (client_type IS NULL) are allowed from any client.
+    if user.client_type is not None and user.client_type != body.client_type:
         await record_auth_failure(ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 

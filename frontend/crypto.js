@@ -14,6 +14,11 @@ const DB_NAME    = "securemsg-keys";
 const DB_VERSION = 1;
 const STORE_NAME = "keys";
 
+// Signal Protocol spec — security control against memory exhaustion DoS.
+// Messages arriving more than MAX_SKIP positions ahead of the current
+// chain counter are rejected outright rather than cached.
+const MAX_SKIP = 1000;
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
@@ -220,6 +225,10 @@ export async function x3dhSend(myIKPriv, bobBundle) {
     const dh4 = await ecdhX25519(ekKP.privateKey, bobOPKPub); // DH(EK_A, OPK_B)
     ikm = concat(ikm, dh4);
     usedOPKPub_b64 = bobBundle.opk.public_key;
+  } else {
+    // OPK exhausted — 3-DH variant. Forward secrecy on THIS first message is
+    // slightly reduced; all subsequent messages are protected by Double Ratchet.
+    console.warn("[X3DH] No OPK available for bundle. Using 3-DH variant.");
   }
 
   // 5. SK = HKDF-SHA256(ikm, salt=0x00*32, info="SecureMsg_X3DH_v1")
@@ -374,9 +383,11 @@ export async function initSessionAsReceiver(SK, senderIKPub_b64, myIKPub_b64) {
 // ---------------------------------------------------------------------------
 
 // Encrypt plaintext_string using the current sending chain.
+// deviceId binds the ciphertext to the specific recipient device (pass "" for
+// sessions without multi-device context).
 // Updates session in-place.
 // Returns { ciphertext_b64, nonce_b64, ratchet_pub_b64, pn, n }.
-export async function ratchetEncrypt(session, plaintext_string) {
+export async function ratchetEncrypt(session, plaintext_string, deviceId = "") {
   if (!session.CKs) throw new Error("ratchetEncrypt: no sending chain");
 
   // 1. Advance sending chain.
@@ -397,9 +408,9 @@ export async function ratchetEncrypt(session, plaintext_string) {
   // 4. Random 12-byte nonce.
   const nonce = crypto.getRandomValues(new Uint8Array(12));
 
-  // 5. AAD: ik_a || ik_b || ratchet_pub || PN (4-byte BE) || N (4-byte BE)
+  // 5. AAD per Signal Protocol spec: IK_A||IK_B||ratchet_pub||PN||N||device_id.
   const N   = session.Ns;
-  const aad = _buildAad(session.ik_a, session.ik_b, session.DHs_pub, session.PN, N);
+  const aad = buildAAD(session.ik_a, session.ik_b, session.DHs_pub, session.PN, N, deviceId);
 
   // 6. Encrypt.
   const ct = await crypto.subtle.encrypt(
@@ -423,8 +434,9 @@ export async function ratchetEncrypt(session, plaintext_string) {
 
 // Decrypt an incoming Double Ratchet message.
 // fields: { ciphertext, nonce, ratchet_pub, pn, n } (all strings/numbers).
-// Updates session in-place. Returns decrypted plaintext string.
-export async function ratchetDecrypt(session, fields, _senderIKPub_b64, _myIKPub_b64) {
+// deviceId must match what the sender used (pass "" for sessions without
+// multi-device context). Updates session in-place. Returns decrypted plaintext.
+export async function ratchetDecrypt(session, fields, deviceId = "") {
   const { ciphertext, nonce, ratchet_pub, pn, n } = fields;
 
   // 1. Check skipped-key cache.
@@ -432,7 +444,7 @@ export async function ratchetDecrypt(session, fields, _senderIKPub_b64, _myIKPub
   if (session.skipped[skippedKey]) {
     const MK_b64 = session.skipped[skippedKey];
     delete session.skipped[skippedKey];
-    return _openMessage(session, MK_b64, ciphertext, nonce, ratchet_pub, pn, n);
+    return _openMessage(session, MK_b64, ciphertext, nonce, ratchet_pub, pn, n, deviceId);
   }
 
   // 2. New DH ratchet epoch.
@@ -441,8 +453,13 @@ export async function ratchetDecrypt(session, fields, _senderIKPub_b64, _myIKPub
 
     // Drain remaining keys from the OLD receive chain up to pn.
     if (session.CKr !== null && session.DHr !== null) {
+      if (pn - session.Nr > MAX_SKIP) {
+        throw new Error(
+          `MAX_SKIP exceeded (old chain): PN=${pn} is ${pn - session.Nr} ` +
+          `ahead of Nr=${session.Nr}. Rejecting to prevent DoS.`,
+        );
+      }
       while (session.Nr < pn) {
-        _evictSkippedIfFull(session);
         const { newCK_b64, MK_b64 } = await chainStep(session.CKr);
         session.skipped[`${session.DHr}:${session.Nr}`] = MK_b64;
         session.CKr = newCK_b64;
@@ -471,8 +488,13 @@ export async function ratchetDecrypt(session, fields, _senderIKPub_b64, _myIKPub
 
   // 3. Skip forward to message n, caching skipped keys.
   if (n < session.Nr) throw new Error("ratchetDecrypt: message older than chain (not cached)");
+  if (n - session.Nr > MAX_SKIP) {
+    throw new Error(
+      `MAX_SKIP exceeded: message index ${n} is ${n - session.Nr} ` +
+      `ahead of Nr=${session.Nr}. Rejecting to prevent DoS.`,
+    );
+  }
   while (session.Nr < n) {
-    _evictSkippedIfFull(session);
     const { newCK_b64, MK_b64 } = await chainStep(session.CKr);
     session.skipped[`${session.DHr}:${session.Nr}`] = MK_b64;
     session.CKr = newCK_b64;
@@ -484,27 +506,36 @@ export async function ratchetDecrypt(session, fields, _senderIKPub_b64, _myIKPub
   session.CKr = newCK_b64;
   session.Nr++;
 
-  return _openMessage(session, MK_b64, ciphertext, nonce, ratchet_pub, pn, n);
+  return _openMessage(session, MK_b64, ciphertext, nonce, ratchet_pub, pn, n, deviceId);
 }
 
-function _buildAad(ikA_b64, ikB_b64, ratchetPub_b64, pn, n) {
+/**
+ * Builds AEAD associated data per Signal Protocol spec (Lecture 08, slide 30).
+ *
+ * AD = IK_A(32) || IK_B(32) || ratchet_pub(32) || PN(4 BE) || N(4 BE) || device_id(UTF-8)
+ *
+ * IK_A || IK_B  — 32-byte X25519 identity public keys from X3DH, fixed for the session
+ *                 lifetime. Dropping them allows the unknown key-share attack (slide 31).
+ * ratchet_pub   — current DH ratchet public key from the message header.
+ * PN || N       — chain counters. Dropping them allows splice/reorder attacks (slide 32).
+ * device_id     — recipient device UUID (multi-device binding, prevents server re-routing).
+ *
+ * All keys are stored and passed as raw-base64 strings.
+ */
+export function buildAAD(ikA_b64, ikB_b64, ratchetPub_b64, PN, N, deviceId) {
   const pnBuf = new Uint8Array(4);
   const nBuf  = new Uint8Array(4);
-  new DataView(pnBuf.buffer).setUint32(0, pn, false);
-  new DataView(nBuf.buffer).setUint32(0, n,  false);
-  return concat(b64ToBytes(ikA_b64), b64ToBytes(ikB_b64), b64ToBytes(ratchetPub_b64), pnBuf, nBuf);
+  new DataView(pnBuf.buffer).setUint32(0, PN, false);
+  new DataView(nBuf.buffer).setUint32(0, N,  false);
+  const did = new TextEncoder().encode(deviceId || "");
+  return concat(b64ToBytes(ikA_b64), b64ToBytes(ikB_b64), b64ToBytes(ratchetPub_b64), pnBuf, nBuf, did);
 }
 
-function _evictSkippedIfFull(session) {
-  const keys = Object.keys(session.skipped);
-  if (keys.length >= 100) delete session.skipped[keys[0]];
-}
-
-async function _openMessage(session, MK_b64, ciphertext_b64, nonce_b64, ratchet_pub_b64, pn, n) {
+async function _openMessage(session, MK_b64, ciphertext_b64, nonce_b64, ratchet_pub_b64, pn, n, deviceId = "") {
   const aesgcmKey = await crypto.subtle.importKey(
     "raw", b64ToBytes(MK_b64), "AES-GCM", false, ["decrypt"],
   );
-  const aad = _buildAad(session.ik_a, session.ik_b, ratchet_pub_b64, pn, n);
+  const aad = buildAAD(session.ik_a, session.ik_b, ratchet_pub_b64, pn, n, deviceId);
   let padded;
   try {
     padded = await crypto.subtle.decrypt(

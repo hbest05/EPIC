@@ -90,6 +90,7 @@ public:
     const QString& username()     const { return m_username; }
     const QString& baseHostname() const { return m_baseHostname; }
     bool isAuthenticated()        const { return !m_csrfToken.isEmpty(); }
+    bool isTlsEnabled()           const { return m_tlsEnabled; }
     CryptoDaemonClient* daemon()  const { return m_daemon.get(); }
 
     /** wss:// URL of the real-time delivery socket on the same host as the API. */
@@ -112,6 +113,7 @@ private:
 
     QString m_baseUrl      = QStringLiteral("https://alpha-and-the-cryptmunks.theburkenator.com");
     QString m_baseHostname = QStringLiteral("alpha-and-the-cryptmunks.theburkenator.com");
+    bool    m_tlsEnabled   = true;
 
     std::shared_ptr<CryptoDaemonClient> m_daemon;
 

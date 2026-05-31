@@ -144,6 +144,12 @@ def derive_sk_sender(
         opk_bytes = _validate_b64_key(peer_bundle["opk_pub"], "opk_pub")
         peer_opk_pub = X25519PublicKey.from_public_bytes(opk_bytes)
         used_opk_b64 = peer_bundle["opk_pub"]
+    else:
+        log.warning(
+            "X3DH: no OPK available for device %s. Using 3-DH variant. "
+            "Forward secrecy on first message is reduced.",
+            peer_bundle.get("device_id", "unknown"),
+        )
 
     ek_priv = X25519PrivateKey.generate()
     ek_pub_bytes = _raw_pub_x(ek_priv.public_key())

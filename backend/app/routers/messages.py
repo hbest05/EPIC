@@ -38,6 +38,7 @@ from app.services.blockchain_service import (
     push_to_batch,
     record_event_triggered_digest,
 )
+from app.services.redis_service import get_redis
 from app.services.ws_manager import manager
 
 logger = logging.getLogger(__name__)

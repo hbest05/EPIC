@@ -26,6 +26,7 @@ _STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 _CSRF_EXEMPT_PATHS = frozenset({
     "/api/auth/login",
     "/api/auth/register",
+    "/api/auth/prekeys",         # called during registration before login sets the cookie
 })
 
 

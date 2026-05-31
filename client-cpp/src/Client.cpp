@@ -55,6 +55,26 @@ void Client::initialize()
         curlInitialized = true;
     }
 
+    // SECUREMSG_SERVER env var overrides the compiled-in server URL.
+    // Use http://localhost:8000 for local dev against docker compose.
+    const QByteArray envServer = qgetenv("SECUREMSG_SERVER");
+    if (!envServer.isEmpty()) {
+        m_baseUrl = QString::fromUtf8(envServer).trimmed();
+        if (m_baseUrl.endsWith('/'))
+            m_baseUrl.chop(1);
+        QUrl parsed(m_baseUrl);
+        m_baseHostname = parsed.host();
+        const bool isHttp = m_baseUrl.startsWith(QStringLiteral("http://"));
+        const bool isLocalhost = (m_baseHostname == QStringLiteral("localhost") ||
+                                  m_baseHostname == QStringLiteral("127.0.0.1"));
+        if (isHttp && !isLocalhost) {
+            // Refuse to disable TLS for non-loopback hosts — this would silently
+            // strip transport security for real servers.
+            qFatal("SECUREMSG_SERVER: plain HTTP is only allowed for localhost/127.0.0.1");
+        }
+        m_tlsEnabled = !isHttp;
+    }
+
     // Per-process cookie jar — keeps the access_token + csrf_token cookies
     // alive across calls without persisting between runs.
     const QString tmpDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
@@ -86,10 +106,15 @@ QByteArray Client::httpRequest(const QString& method,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-    // TLS hardening — explicit floor, full peer + hostname verification.
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-    curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    // TLS hardening — only when talking to an HTTPS endpoint.
+    if (m_tlsEnabled) {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
 
     // Persistent cookie jar so backend's session cookie survives between calls.
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, m_cookieJarPath.c_str());
@@ -199,11 +224,12 @@ QString Client::registerUser(const QString& username,
                              const QByteArray& ed25519PubKey)
 {
     QJsonObject body;
-    body.insert(QStringLiteral("username"), username);
-    body.insert(QStringLiteral("email"),    email);
-    body.insert(QStringLiteral("password"), password);
-    body.insert(QStringLiteral("x25519_public_key"),  QString::fromUtf8(x25519PubKey.toBase64()));
-    body.insert(QStringLiteral("ed25519_public_key"), QString::fromUtf8(ed25519PubKey.toBase64()));
+    body.insert(QStringLiteral("username"),            username);
+    body.insert(QStringLiteral("email"),               email);
+    body.insert(QStringLiteral("password"),            password);
+    body.insert(QStringLiteral("x25519_public_key"),   QString::fromUtf8(x25519PubKey.toBase64()));
+    body.insert(QStringLiteral("ed25519_public_key"),  QString::fromUtf8(ed25519PubKey.toBase64()));
+    body.insert(QStringLiteral("client_type"),         QStringLiteral("cpp"));
 
     const QByteArray resp = httpRequest(QStringLiteral("POST"),
                                         QStringLiteral("/api/auth/register"),
@@ -219,8 +245,9 @@ QString Client::registerUser(const QString& username,
 QString Client::login(const QString& username, const QString& password)
 {
     QJsonObject body;
-    body.insert(QStringLiteral("username"), username);
-    body.insert(QStringLiteral("password"), password);
+    body.insert(QStringLiteral("username"),    username);
+    body.insert(QStringLiteral("password"),    password);
+    body.insert(QStringLiteral("client_type"), QStringLiteral("cpp"));
 
     const QByteArray resp = httpRequest(QStringLiteral("POST"),
                                         QStringLiteral("/api/auth/login"),
@@ -390,3 +417,4 @@ QString Client::fetchSent(QJsonArray* out,
     if (out) *out = QJsonDocument::fromJson(resp).array();
     return {};
 }
+
