@@ -16,11 +16,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import select, tuple_
+from sqlalchemy import String, cast, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.message import Message
+from app.models.revocation import ConversationRevocation
 from app.models.user import User
 from app.schemas.message import (
     MessageResponse,
@@ -56,6 +57,27 @@ def _conversation_id(user_a_id, user_b_id) -> str:
     """
     a, b = str(user_a_id), str(user_b_id)
     return f"{min(a, b)}_{max(a, b)}"
+
+
+def _not_revoked_clause(current_user_id, other_party_col):
+    """SQL predicate: the current user's access to the conversation with
+    `other_party_col` has NOT been revoked.
+
+    Mirrors _conversation_id() in SQL — least/greatest over the text form of the
+    two UUIDs gives the same lexicographic ordering as Python's min/max, since
+    Postgres uuid::text is canonical lowercase.
+    """
+    me = str(current_user_id)
+    other = cast(other_party_col, String)
+    conv_expr = func.concat(func.least(other, me), "_", func.greatest(other, me))
+    return ~(
+        select(ConversationRevocation.id)
+        .where(
+            ConversationRevocation.revoked_user_id == current_user_id,
+            ConversationRevocation.conversation_id == conv_expr,
+        )
+        .exists()
+    )
 
 
 def _to_response(
@@ -282,6 +304,7 @@ async def get_inbox(
         select(Message, User.username)
         .join(User, User.id == Message.sender_id)
         .where(Message.recipient_id == current_user.id)
+        .where(_not_revoked_clause(current_user.id, Message.sender_id))
     )
 
     if with_user is not None:
@@ -323,6 +346,7 @@ async def get_sent(
         select(Message, User.username)
         .join(User, User.id == Message.recipient_id)
         .where(Message.sender_id == current_user.id)
+        .where(_not_revoked_clause(current_user.id, Message.recipient_id))
     )
 
     if with_user is not None:

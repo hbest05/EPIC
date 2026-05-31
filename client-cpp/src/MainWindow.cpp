@@ -922,7 +922,7 @@ void MainWindow::onRevokeAccess()
     const auto confirm = QMessageBox::question(
         this, tr("Revoke access"),
         tr("Revoke %1's access to this conversation? "
-           "This will be recorded on the blockchain.").arg(m_activeContact),
+           "They will no longer be able to view messages.").arg(m_activeContact),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (confirm != QMessageBox::Yes) return;
 
