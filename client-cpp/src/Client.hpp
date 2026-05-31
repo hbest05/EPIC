@@ -59,9 +59,6 @@ public:
     /** GET /auth/user/<username>/keybundle. */
     QString fetchKeybundle(const QString& username, QJsonObject* out);
 
-    /** GET /auth/me — current user's profile ({id, username}). */
-    QString fetchMe(QJsonObject* out);
-
     /** Revoke a single message for its recipient ("delete for recipient only")
      *  via POST /messages/<messageId>/revoke. Only the sender may do this.
      *  @returns empty string on success, error message on failure. */

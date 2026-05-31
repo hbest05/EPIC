@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
 from app.models.message import Message
-from app.schemas.message import BlockchainVerifyResponse, RevokeAccessResponse
+from app.schemas.message import BlockchainVerifyResponse
 from app.services.auth_service import get_current_user
 from app.services.rate_limit import limiter
 from app.services.blockchain_service import (

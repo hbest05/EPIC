@@ -312,21 +312,6 @@ QString Client::fetchKeybundle(const QString& username, QJsonObject* out)
     return {};
 }
 
-QString Client::fetchMe(QJsonObject* out)
-{
-    const QByteArray resp = httpRequest(QStringLiteral("GET"),
-                                        QStringLiteral("/api/auth/me"),
-                                        {});
-    if (m_lastStatus != 200) {
-        if (!m_lastError.isEmpty()) return m_lastError;
-        const QJsonObject obj = QJsonDocument::fromJson(resp).object();
-        return obj.value(QStringLiteral("detail")).toString(
-            QStringLiteral("profile fetch failed (HTTP %1)").arg(m_lastStatus));
-    }
-    if (out) *out = QJsonDocument::fromJson(resp).object();
-    return {};
-}
-
 QString Client::revokeAccess(const QString& messageId)
 {
     const QByteArray resp = httpRequest(
