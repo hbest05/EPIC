@@ -28,7 +28,6 @@ from app.services.auth_service import get_current_user
 from app.services.rate_limit import limiter
 from app.services.blockchain_service import (
     blockchain_configured,
-    record_event_triggered_digest,
     record_final_digest,
     verify_on_chain,
 )
@@ -321,21 +320,15 @@ async def revoke_access(
         session.add(revocation)
         await session.flush()
         await session.refresh(revocation)   # populate server-side revoked_at
-        revocation_id = str(revocation.id)
-        revoked_at    = revocation.revoked_at
+        revoked_at = revocation.revoked_at
         await session.commit()
 
-    # 6. Tier 2: await blockchain recording directly — event timestamp is significant
-    content          = f"{user_id}:{conversation_id}"
-    blockchain_result = await record_event_triggered_digest(conversation_id, revocation_id, content)
-
-    tx_hash   = blockchain_result.get("tx_hash") if blockchain_result else None
-    etherscan = f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
-
+    # Revocation is persisted; on-chain recording is intentionally skipped here,
+    # so tx_hash/etherscan_url are always None.
     return RevokeAccessResponse(
         revoked_user_id=user_id,
         conversation_id=conversation_id,
-        tx_hash=tx_hash,
-        etherscan_url=etherscan,
+        tx_hash=None,
+        etherscan_url=None,
         revoked_at=revoked_at,
     )

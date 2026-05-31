@@ -873,9 +873,12 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
     QAction* saveConvoAction    = menu.addAction(tr("Download conversation"));
     menu.addSeparator();
     QAction* selectAction       = menu.addAction(tr("Select messages…"));
+    QAction* revokeAction       = m_activeContact.isEmpty() ? nullptr
+                                  : menu.addAction(tr("Revoke access…"));
     const QAction* chosen       = menu.exec(m_thread->mapToGlobal(pos));
     if (!chosen) return;
 
+    if (chosen == revokeAction)      { onRevokeAccess();        return; }
     if (chosen == selectAction)      { enterSelectionMode(row); return; }
     if (chosen == forwardAction)     { onForwardSingle(row);    return; }
     if (chosen == saveMessageAction) { onDownloadSingle(row);   return; }
@@ -910,6 +913,28 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
     m_threads[m_activeContact].removeAt(idx);
     saveHistory();
     renderActiveThread();
+}
+
+void MainWindow::onRevokeAccess()
+{
+    if (m_activeContact.isEmpty()) return;
+
+    const auto confirm = QMessageBox::question(
+        this, tr("Revoke access"),
+        tr("Revoke %1's access to this conversation? "
+           "This will be recorded on the blockchain.").arg(m_activeContact),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (confirm != QMessageBox::Yes) return;
+
+    const QString err = m_client->revokeAccess(m_activeContact);
+    if (!err.isEmpty()) {
+        QMessageBox::warning(this, tr("Revoke failed"), err);
+        return;
+    }
+
+    QMessageBox::information(this, tr("Access revoked"),
+                             tr("%1's access to this conversation has been revoked.")
+                                 .arg(m_activeContact));
 }
 
 // ---------------------------------------------------------------------------

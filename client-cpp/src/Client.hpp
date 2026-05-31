@@ -59,6 +59,15 @@ public:
     /** GET /auth/user/<username>/keybundle. */
     QString fetchKeybundle(const QString& username, QJsonObject* out);
 
+    /** GET /auth/me — current user's profile ({id, username}). */
+    QString fetchMe(QJsonObject* out);
+
+    /** Revoke a contact's access to the conversation we share with them and
+     *  record it on the blockchain via
+     *  POST /conversations/<conversation_id>/revoke/<user_id>.
+     *  @returns empty string on success, error message on failure. */
+    QString revokeAccess(const QString& contactUsername);
+
     // --- Messages ---
 
     /** POST /messages/send with Double Ratchet header fields.
