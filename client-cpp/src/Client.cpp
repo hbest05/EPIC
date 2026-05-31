@@ -31,8 +31,6 @@ size_t writeToByteArray(char* ptr, size_t size, size_t nmemb, void* userdata)
     return size * nmemb;
 }
 
-QString utf8(const QByteArray& b) { return QString::fromUtf8(b); }
-
 } // namespace
 
 Client::Client(std::shared_ptr<CryptoDaemonClient> daemon)
