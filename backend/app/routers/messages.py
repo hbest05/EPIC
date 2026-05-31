@@ -415,6 +415,7 @@ async def delete_message(
 @router.post("/{message_id}/revoke")
 async def revoke_message(
     message_id: UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession  = Depends(get_db),
 ):
@@ -435,5 +436,11 @@ async def revoke_message(
         )
 
     msg.deleted_for_recipient = True
-    # get_db() commits on success.
+    # get_db() commits before BackgroundTasks run, so the push fires after the
+    # flag is persisted — the recipient drops it from their local cache.
+    background_tasks.add_task(
+        manager.send_to_user,
+        str(msg.recipient_id),
+        {"type": "message_deleted", "message_id": str(msg.id)},
+    )
     return {"revoked": True}
