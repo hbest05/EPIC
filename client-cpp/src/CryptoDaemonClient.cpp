@@ -265,4 +265,3 @@ QString CryptoDaemonClient::decryptMessage(const QString& sessionId,
     const QJsonObject data = call(QStringLiteral("decrypt_message"), params);
     return data.value(QStringLiteral("plaintext")).toString();
 }
-

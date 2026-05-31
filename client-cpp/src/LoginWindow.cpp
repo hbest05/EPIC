@@ -70,12 +70,6 @@ LoginWindow::LoginWindow(Client* client, QWidget* parent)
 
 void LoginWindow::updateTlsIndicator()
 {
-    if (!m_client->isTlsEnabled()) {
-        m_tlsLabel->setText(tr("\xE2\x9A\xA0  Local dev mode — no TLS"));
-        m_tlsLabel->setStyleSheet(QStringLiteral("color: #b45309; font-weight: bold;"));
-        return;
-    }
-
     const TLSVerifier::VerifyResult r =
         TLSVerifier::verify(m_client->baseHostname().toStdString(), 443);
     if (r.valid) {

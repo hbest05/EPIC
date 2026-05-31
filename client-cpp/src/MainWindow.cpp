@@ -463,32 +463,31 @@ void MainWindow::pollInbox()
     const QString err = m_client->fetchInbox(&inbox, kPageSize, QString(),
                                              m_lastInboxId, QString());
     if (!err.isEmpty()) {
+        // Quiet: poll failures shouldn't spam dialogs.
         return;
     }
+    if (inbox.isEmpty()) return;
 
-    if (!inbox.isEmpty()) {
-        // The server returns newest-first; decrypt oldest-first so the Double
-        // Ratchet receive chain advances in order.
-        QList<QJsonObject> ordered;
-        ordered.reserve(inbox.size());
-        for (const QJsonValue& v : inbox) ordered.prepend(v.toObject());
+    // The server returns newest-first; decrypt oldest-first so the Double
+    // Ratchet receive chain advances in order.
+    QList<QJsonObject> ordered;
+    ordered.reserve(inbox.size());
+    for (const QJsonValue& v : inbox) ordered.prepend(v.toObject());
 
-        // The newest id in this batch becomes the next poll cursor regardless of
-        // per-message decrypt success — failed messages are unrecoverable anyway.
-        const QString newestId = inbox.first().toObject()
-                                     .value(QStringLiteral("id")).toString();
+    // The newest id in this batch becomes the next poll cursor regardless of
+    // per-message decrypt success — failed messages are unrecoverable anyway.
+    const QString newestId = inbox.first().toObject()
+                                 .value(QStringLiteral("id")).toString();
 
-        bool changed = false;
-        for (const QJsonObject& m : ordered) {
-            // Persist once at the end of the batch instead of per message.
-            if (processInboundMessage(m, /*persist=*/false)) changed = true;
-        }
-
-        if (!newestId.isEmpty()) m_lastInboxId = newestId;
-        saveHistory();
-        if (changed) renderActiveThread();
+    bool changed = false;
+    for (const QJsonObject& m : ordered) {
+        // Persist once at the end of the batch instead of per message.
+        if (processInboundMessage(m, /*persist=*/false)) changed = true;
     }
 
+    if (!newestId.isEmpty()) m_lastInboxId = newestId;
+    saveHistory();
+    if (changed) renderActiveThread();
 }
 
 bool MainWindow::processInboundMessage(const QJsonObject& m, bool persist)

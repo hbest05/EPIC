@@ -93,8 +93,7 @@ endif()
 
 # Treat warnings as errors in debug builds
 target_compile_options(SecureMsg PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/W3>
-    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic>
+    $<$<CONFIG:Debug>:-Wall -Wextra -Wpedantic>
 )
 
 install(TARGETS SecureMsg DESTINATION bin)
