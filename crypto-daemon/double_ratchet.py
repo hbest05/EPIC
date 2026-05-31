@@ -243,6 +243,9 @@ class Session:
         # 3. Skip ahead in the current recv chain to reach n.
         if n < self.n_recv:
             raise ValueError("decrypt: message older than chain (not cached)")
+        # Reject before the loop: a malicious n must never spin the chain.
+        if n - self.n_recv > MAX_SKIPPED:
+            raise ValueError("decrypt: too many skipped keys")
         while self.n_recv < n:
             if len(self.skipped) >= MAX_SKIPPED:
                 raise ValueError("decrypt: too many skipped keys")
@@ -284,6 +287,9 @@ class Session:
         # Drain the remaining keys of the OLD recv chain so out-of-order
         # messages from before the peer's ratchet are still decryptable.
         if self.ck_recv is not None and self.dhr_bytes is not None:
+            # Reject before the loop: a malicious their_pn must never spin the chain.
+            if their_pn - self.n_recv > MAX_SKIPPED:
+                raise ValueError("dh_ratchet: too many skipped keys")
             while self.n_recv < their_pn:
                 if len(self.skipped) >= MAX_SKIPPED:
                     raise ValueError("dh_ratchet: too many skipped keys")
