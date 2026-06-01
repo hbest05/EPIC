@@ -7,7 +7,7 @@
  *
  * History persistence: the Double Ratchet consumes each message key on first
  * decrypt, so server ciphertext cannot be re-decrypted after a restart. We
- * therefore keep a local plaintext history cache per user (m_threads, mirrored
+ * therefore keep a local plaintext history cache per user (m_store, mirrored
  * to disk) which is the source of truth for the thread view. Sessions are
  * restored from the daemon's persisted session files so newly-arrived (offline)
  * messages still decrypt in order.
@@ -17,8 +17,10 @@
 
 #include "Client.hpp"
 #include "CryptoDaemonClient.hpp"
+#include "MessageItemDelegate.hpp"
 
 #include <QtCore/QDateTime>
+#include <QtCore/QDebug>
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QJsonArray>
@@ -55,53 +57,6 @@ static constexpr int kDotsZoneWidth   = 28; // px on the right for the ⋮ hit t
 static constexpr int kCircleZoneWidth = 28; // px on the left for the selection circle hit target
 static constexpr int kCircleRadius    =  7; // outer circle radius (scales with typical row height)
 static constexpr int kDotRadius       =  3; // inner dot radius when selected
-
-class MessageItemDelegate : public QStyledItemDelegate
-{
-    const bool* m_selectionMode;
-public:
-    MessageItemDelegate(const bool* selectionMode, QObject* parent)
-        : QStyledItemDelegate(parent), m_selectionMode(selectionMode) {}
-
-    void paint(QPainter* painter, const QStyleOptionViewItem& option,
-               const QModelIndex& index) const override
-    {
-        QStyledItemDelegate::paint(painter, option, index);
-
-        if (*m_selectionMode) {
-            // Circle centred in the left kCircleZoneWidth strip
-            const int cy = option.rect.center().y();
-            const int cx = option.rect.left() + kCircleZoneWidth / 2;
-            const bool sel = option.state & QStyle::State_Selected;
-            painter->save();
-            painter->setRenderHint(QPainter::Antialiasing);
-            if (sel) {
-                painter->setBrush(QColor(QStringLiteral("#0084ff")));
-                painter->setPen(Qt::NoPen);
-                painter->drawEllipse(QPoint(cx, cy), kCircleRadius, kCircleRadius);
-                painter->setBrush(Qt::white);
-                painter->setPen(Qt::NoPen);
-                painter->drawEllipse(QPoint(cx, cy), kDotRadius, kDotRadius);
-            } else {
-                painter->setBrush(Qt::NoBrush);
-                painter->setPen(QPen(QColor(QStringLiteral("#bbbbbb")), 1.5));
-                painter->drawEllipse(QPoint(cx, cy), kCircleRadius, kCircleRadius);
-            }
-            painter->restore();
-        } else {
-            if (option.state & (QStyle::State_Selected | QStyle::State_MouseOver)) {
-                painter->save();
-                painter->setPen((option.state & QStyle::State_Selected)
-                                ? option.palette.highlightedText().color()
-                                : option.palette.placeholderText().color());
-                painter->drawText(option.rect.adjusted(0, 0, -8, 0),
-                                  Qt::AlignRight | Qt::AlignVCenter,
-                                  QStringLiteral("⋮"));
-                painter->restore();
-            }
-        }
-    }
-};
 
 QByteArray b64dec(const QJsonValue& v)
 {
@@ -189,6 +144,7 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     mainLayout->addWidget(split, 1);
     setCentralWidget(central);
 
+    // currentUser() also available: m_client->currentUser().username(), .x25519PublicKey(), etc.
     m_topBar->setText(tr("\xF0\x9F\x90\xBF %1  —  signed in as %2")
                       .arg(m_client->baseHostname(), m_client->username()));
     m_topBar->setStyleSheet(QStringLiteral("padding: 6px; background: #f0f4f8;"));
@@ -267,22 +223,37 @@ void MainWindow::loadHistory()
     const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
     f.close();
 
-    m_lastInboxId = root.value(QStringLiteral("last_inbox_id")).toString();
+    m_store.setLastInboxId(root.value(QStringLiteral("last_inbox_id")).toString().toStdString());
 
     const QJsonArray msgs = root.value(QStringLiteral("messages")).toArray();
+
+    // std::find used via QSet::contains for O(1) duplicate detection —
+    // the seen-id set already uses QSet which is a hash set.
+    const auto missingContact = std::find_if(msgs.constBegin(), msgs.constEnd(),
+        [](const QJsonValue& v) {
+            return v.toObject().value(QStringLiteral("contact")).toString().isEmpty();
+        });
+    if (missingContact != msgs.constEnd()) {
+        qWarning() << "MainWindow::loadHistory: history contains message(s) with an empty contact field";
+    }
+
     for (const QJsonValue& v : msgs) {
         const QJsonObject o = v.toObject();
-        ThreadMessage m;
-        m.id     = o.value(QStringLiteral("id")).toString();
-        m.fromMe = o.value(QStringLiteral("from_me")).toBool();
-        m.sender = o.value(QStringLiteral("sender")).toString();
-        m.text   = o.value(QStringLiteral("text")).toString();
-        m.ts     = o.value(QStringLiteral("ts")).toString();
         const QString contact = o.value(QStringLiteral("contact")).toString();
         if (contact.isEmpty()) continue;
 
-        m_threads[contact].append(m);
-        if (!m.id.isEmpty()) m_seenMessageIds.insert(m.id);
+        Message m;
+        m.setId(o.value(QStringLiteral("id")).toString());
+        m.setDirection(o.value(QStringLiteral("from_me")).toBool()
+                           ? Message::Direction::Sent
+                           : Message::Direction::Received);
+        m.setSenderUsername(o.value(QStringLiteral("sender")).toString());
+        m.setPlaintext(o.value(QStringLiteral("text")).toString());
+        m.setCreatedAt(QDateTime::fromString(
+            o.value(QStringLiteral("ts")).toString(), Qt::ISODate));
+
+        m_store.conversation(contact.toStdString()).messages.push_back(m);
+        m_store.markIdSeen(m.id().toStdString());
         ensureContact(contact);
     }
 }
@@ -290,21 +261,25 @@ void MainWindow::loadHistory()
 void MainWindow::saveHistory() const
 {
     QJsonArray msgs;
-    for (auto it = m_threads.constBegin(); it != m_threads.constEnd(); ++it) {
-        for (const ThreadMessage& m : it.value()) {
-            QJsonObject o;
-            o.insert(QStringLiteral("contact"), it.key());
-            o.insert(QStringLiteral("id"),      m.id);
-            o.insert(QStringLiteral("from_me"), m.fromMe);
-            o.insert(QStringLiteral("sender"),  m.sender);
-            o.insert(QStringLiteral("text"),    m.text);
-            o.insert(QStringLiteral("ts"),      m.ts);
-            msgs.append(o);
-        }
+    for (const std::string& contact : m_store.contactUsernames()) {
+        const MessageStore::Conversation* conv = m_store.conversationPtr(contact);
+        if (!conv) continue;
+        const QString contactName = QString::fromStdString(contact);
+        std::for_each(conv->messages.cbegin(), conv->messages.cend(),
+            [&msgs, &contactName](const Message& m) {
+                QJsonObject o;
+                o.insert(QStringLiteral("contact"), contactName);
+                o.insert(QStringLiteral("id"),      m.id());
+                o.insert(QStringLiteral("from_me"), m.direction() == Message::Direction::Sent);
+                o.insert(QStringLiteral("sender"),  m.senderUsername());
+                o.insert(QStringLiteral("text"),    m.plaintext());
+                o.insert(QStringLiteral("ts"),      m.createdAt().toString(Qt::ISODate));
+                msgs.append(o);
+            });
     }
 
     QJsonObject root;
-    root.insert(QStringLiteral("last_inbox_id"), m_lastInboxId);
+    root.insert(QStringLiteral("last_inbox_id"), QString::fromStdString(m_store.lastInboxId()));
     root.insert(QStringLiteral("messages"), msgs);
 
     QFile f(historyFilePath());
@@ -326,8 +301,9 @@ void MainWindow::restoreSessions()
     for (const auto& s : sessions) {
         if (s.peerUserId.isEmpty() || s.sessionId.isEmpty()) continue;
         // Last one wins if a peer somehow has multiple sessions.
-        m_sessions.insert(s.peerUserId, s.sessionId);
-        m_sentFirstMessage.insert(s.peerUserId, true);
+        MessageStore::Conversation& conv = m_store.conversation(s.peerUserId.toStdString());
+        conv.sessionId = s.sessionId.toStdString();
+        conv.sentFirstMessage = true;
         ensureContact(s.peerUserId);
     }
 }
@@ -343,10 +319,10 @@ void MainWindow::ensureContact(const QString& username)
     }
 }
 
-void MainWindow::appendMessage(const QString& contact, const ThreadMessage& msg, bool persist)
+void MainWindow::appendMessage(const QString& contact, const Message& msg, bool persist)
 {
-    m_threads[contact].append(msg);
-    if (!msg.id.isEmpty()) m_seenMessageIds.insert(msg.id);
+    m_store.addMessage(contact.toStdString(), msg);
+    m_store.markIdSeen(msg.id().toStdString());
     ensureContact(contact);
     if (persist) saveHistory();
     if (contact == m_activeContact) renderActiveThread();
@@ -357,15 +333,15 @@ void MainWindow::renderActiveThread()
     m_thread->clear();
     if (m_activeContact.isEmpty()) return;
 
-    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
-    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int start = qMax(0, all.size() - limit);
+    const std::vector<Message>& all = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int limit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int start = qMax(0, static_cast<int>(all.size()) - limit);
 
-    for (int i = start; i < all.size(); ++i) {
-        const ThreadMessage& m = all[i];
-        const QString label = m.fromMe
-            ? QStringLiteral("me: ") + m.text
-            : QStringLiteral("%1: %2").arg(m.sender, m.text);
+    for (int i = start; i < static_cast<int>(all.size()); ++i) {
+        const Message& m = all[i];
+        const QString label = (m.direction() == Message::Direction::Sent)
+            ? QStringLiteral("me: ") + m.plaintext()
+            : QStringLiteral("%1: %2").arg(m.senderUsername(), m.plaintext());
         m_thread->addItem(label);
     }
 
@@ -376,7 +352,7 @@ void MainWindow::selectContact(const QString& username)
 {
     if (m_selectionMode) exitSelectionMode();
     m_activeContact = username;
-    m_renderLimit.insert(username, kPageSize);
+    m_store.conversation(username.toStdString()).renderLimit = kPageSize;
     renderActiveThread();
 }
 
@@ -389,8 +365,11 @@ void MainWindow::onContactSelected(QListWidgetItem* item)
 void MainWindow::onLoadOlderClicked()
 {
     if (m_activeContact.isEmpty()) return;
-    const int current = m_renderLimit.value(m_activeContact, kPageSize);
-    m_renderLimit.insert(m_activeContact, current + kPageSize);
+    const std::string activeKey = m_activeContact.toStdString();
+    const int current = m_store.conversation(activeKey).renderLimit;
+    const int total   = m_store.countMessagesFor(activeKey);
+    // Don't grow the render window past the number of messages we actually have.
+    m_store.conversation(activeKey).renderLimit = qMin(current + kPageSize, total);
     renderActiveThread();
 }
 
@@ -421,8 +400,9 @@ bool MainWindow::startSessionWith(const QString& username, QString* err)
     // Defer the actual x3dh_send until the user types something — we don't
     // want to burn an OPK and a session just to "add" a contact. Store the
     // peer bundle by enqueueing a pending session marker.
-    m_sessions.insert(username, QString{});       // empty == not-yet-initialised
-    m_sentFirstMessage.insert(username, false);
+    MessageStore::Conversation& conv = m_store.conversation(username.toStdString());
+    conv.sessionId = std::string{};  // empty == not-yet-initialised
+    conv.sentFirstMessage = false;
     Q_UNUSED(peer);
     return true;
 }
@@ -442,7 +422,7 @@ void MainWindow::onAddContactClicked()
     }
 
     // Adding a contact we already have history with shouldn't wipe the session.
-    if (!m_sessions.contains(name)) {
+    if (!m_store.hasConversation(name.toStdString())) {
         QString err;
         if (!startSessionWith(name, &err)) {
             QMessageBox::warning(this, tr("Couldn't add contact"), err);
@@ -460,7 +440,7 @@ void MainWindow::onAddContactClicked()
 
 bool MainWindow::sendTextToContact(const QString& contact, const QString& text)
 {
-    QString sessionId = m_sessions.value(contact);
+    QString sessionId = QString::fromStdString(m_store.conversation(contact.toStdString()).sessionId);
     QString msgId;
 
     try {
@@ -499,8 +479,9 @@ bool MainWindow::sendTextToContact(const QString& contact, const QString& text)
                 QMessageBox::warning(this, tr("Send failed"), err);
                 return false;
             }
-            m_sessions.insert(contact, r.sessionId);
-            m_sentFirstMessage.insert(contact, true);
+            MessageStore::Conversation& conv = m_store.conversation(contact.toStdString());
+            conv.sessionId = r.sessionId.toStdString();
+            conv.sentFirstMessage = true;
         } else {
             const EncryptedMessage enc =
                 m_client->daemon()->encryptMessage(sessionId, text);
@@ -518,12 +499,12 @@ bool MainWindow::sendTextToContact(const QString& contact, const QString& text)
         return false;
     }
 
-    ThreadMessage mine;
-    mine.id     = msgId;
-    mine.fromMe = true;
-    mine.sender = m_client->username();
-    mine.text   = text;
-    mine.ts     = nowIso();
+    Message mine;
+    mine.setId(msgId);
+    mine.setDirection(Message::Direction::Sent);
+    mine.setSenderUsername(m_client->username());
+    mine.setPlaintext(text);
+    mine.setCreatedAt(QDateTime::fromString(nowIso(), Qt::ISODate));
     appendMessage(contact, mine);
     return true;
 }
@@ -551,7 +532,7 @@ void MainWindow::pollInbox()
     // Only fetch messages newer than the last one we processed. On the very
     // first run (empty cursor) this pulls the most recent page to bootstrap.
     const QString err = m_client->fetchInbox(&inbox, kPageSize, QString(),
-                                             m_lastInboxId, QString());
+                                             QString::fromStdString(m_store.lastInboxId()), QString());
     if (!err.isEmpty()) {
         // Quiet: poll failures shouldn't spam dialogs.
         return;
@@ -562,7 +543,10 @@ void MainWindow::pollInbox()
     // Ratchet receive chain advances in order.
     QList<QJsonObject> ordered;
     ordered.reserve(inbox.size());
-    for (const QJsonValue& v : inbox) ordered.prepend(v.toObject());
+    std::transform(inbox.begin(), inbox.end(), std::back_inserter(ordered),
+        [](const QJsonValue& v) { return v.toObject(); });
+    // reverse so Double Ratchet receive chain advances oldest-first
+    std::reverse(ordered.begin(), ordered.end()); // server returns newest-first
 
     // The newest id in this batch becomes the next poll cursor regardless of
     // per-message decrypt success — failed messages are unrecoverable anyway.
@@ -575,7 +559,7 @@ void MainWindow::pollInbox()
         if (processInboundMessage(m, /*persist=*/false)) changed = true;
     }
 
-    if (!newestId.isEmpty()) m_lastInboxId = newestId;
+    if (!newestId.isEmpty()) m_store.setLastInboxId(newestId.toStdString());
     saveHistory();
     if (changed) renderActiveThread();
 }
@@ -583,12 +567,12 @@ void MainWindow::pollInbox()
 bool MainWindow::processInboundMessage(const QJsonObject& m, bool persist)
 {
     const QString id = m.value(QStringLiteral("id")).toString();
-    if (id.isEmpty() || m_seenMessageIds.contains(id)) return false;
-    m_seenMessageIds.insert(id);
+    if (id.isEmpty() || m_store.isIdSeen(id.toStdString())) return false;
+    m_store.markIdSeen(id.toStdString());
 
     const QString sender = m.value(QStringLiteral("sender_username")).toString();
 
-    QString sessionId = m_sessions.value(sender);
+    QString sessionId = QString::fromStdString(m_store.conversation(sender.toStdString()).sessionId);
     try {
         const QJsonValue hdrVal = m.value(QStringLiteral("x3dh_header"));
         if (hdrVal.isObject() && sessionId.isEmpty()) {
@@ -599,7 +583,7 @@ bool MainWindow::processInboundMessage(const QJsonObject& m, bool persist)
             const QJsonValue opk = h.value(QStringLiteral("used_opk_pub"));
             if (opk.isString()) hdr.usedOpkPub = b64dec(opk);
             sessionId = m_client->daemon()->x3dhReceive(sender, hdr);
-            m_sessions.insert(sender, sessionId);
+            m_store.conversation(sender.toStdString()).sessionId = sessionId.toStdString();
             ensureContact(sender);
         }
         if (sessionId.isEmpty()) {
@@ -616,12 +600,13 @@ bool MainWindow::processInboundMessage(const QJsonObject& m, bool persist)
 
         const QString plaintext = m_client->daemon()->decryptMessage(sessionId, f);
 
-        ThreadMessage tm;
-        tm.id     = id;
-        tm.fromMe = false;
-        tm.sender = sender;
-        tm.text   = plaintext;
-        tm.ts     = m.value(QStringLiteral("created_at")).toString(nowIso());
+        Message tm;
+        tm.setId(id);
+        tm.setDirection(Message::Direction::Received);
+        tm.setSenderUsername(sender);
+        tm.setPlaintext(plaintext);
+        tm.setCreatedAt(QDateTime::fromString(
+            m.value(QStringLiteral("created_at")).toString(nowIso()), Qt::ISODate));
         appendMessage(sender, tm, persist);
         return true;
     } catch (const CryptoDaemonError& e) {
@@ -695,7 +680,7 @@ void MainWindow::onWsTextMessage(const QString& text)
         const QJsonObject m = obj.value(QStringLiteral("message")).toObject();
         if (processInboundMessage(m, /*persist=*/false)) {
             const QString id = m.value(QStringLiteral("id")).toString();
-            if (!id.isEmpty()) m_lastInboxId = id;
+            if (!id.isEmpty()) m_store.setLastInboxId(id.toStdString());
             saveHistory();
         }
         return;
@@ -705,21 +690,9 @@ void MainWindow::onWsTextMessage(const QString& text)
         const QString msgId = obj.value(QStringLiteral("message_id")).toString();
         if (msgId.isEmpty()) return;
 
-        // Search all threads for this ID and remove it from the local cache.
-        bool changed = false;
-        for (auto it = m_threads.begin(); it != m_threads.end(); ++it) {
-            QList<ThreadMessage>& thread = it.value();
-            for (int i = 0; i < thread.size(); ++i) {
-                if (thread.at(i).id == msgId) {
-                    thread.removeAt(i);
-                    m_seenMessageIds.remove(msgId);
-                    changed = true;
-                    break;
-                }
-            }
-            if (changed) break;
-        }
-        if (changed) {
+        // Remove the message from the local cache (find_if + erase, inside the store).
+        if (m_store.hasMessageId(msgId.toStdString())) {
+            m_store.removeMessageById(msgId.toStdString());
             saveHistory();
             renderActiveThread();
         }
@@ -774,21 +747,21 @@ void MainWindow::onSelectionDeleteClicked()
     const QList<QListWidgetItem*> selected = m_thread->selectedItems();
     if (selected.isEmpty()) return;
 
-    QList<ThreadMessage>& all = m_threads[m_activeContact];
-    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int start = qMax(0, all.size() - limit);
+    const std::vector<Message>& all = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int limit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int start = qMax(0, static_cast<int>(all.size()) - limit);
 
     // Validate — all selected messages must have a server UUID
     QStringList ids;
     for (const QListWidgetItem* item : selected) {
         const int idx = start + m_thread->row(item);
-        if (idx < 0 || idx >= all.size()) continue;
-        if (all.at(idx).id.isEmpty()) {
+        if (idx < 0 || idx >= static_cast<int>(all.size())) continue;
+        if (all.at(idx).id().isEmpty()) {
             QMessageBox::warning(this, tr("Cannot delete"),
                                  tr("One or more selected messages have no server ID."));
             return;
         }
-        ids << all.at(idx).id;
+        ids << all.at(idx).id();
     }
     if (ids.isEmpty()) return;
 
@@ -800,13 +773,7 @@ void MainWindow::onSelectionDeleteClicked()
             QMessageBox::warning(this, tr("Delete failed"), err);
             break; // leave any remaining messages in place — user can retry
         }
-        for (int i = 0; i < all.size(); ++i) {
-            if (all.at(i).id == id) {
-                m_seenMessageIds.remove(id);
-                all.removeAt(i);
-                break;
-            }
-        }
+        m_store.removeMessageById(id.toStdString());
     }
 
     saveHistory();
@@ -876,12 +843,12 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
 
     // "Revoke access…" only applies to a message we forwarded to this contact,
     // identified by the leading forward-arrow marker (↪) on its text.
-    const QList<ThreadMessage>& menuMsgs = m_threads.value(m_activeContact);
-    const int menuLimit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int menuStart = qMax(0, menuMsgs.size() - menuLimit);
+    const std::vector<Message>& menuMsgs = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int menuLimit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int menuStart = qMax(0, static_cast<int>(menuMsgs.size()) - menuLimit);
     const int menuIdx   = menuStart + row;
-    const bool isForwarded = menuIdx >= 0 && menuIdx < menuMsgs.size()
-                             && menuMsgs.at(menuIdx).text.startsWith(QChar(0x21AA));
+    const bool isForwarded = menuIdx >= 0 && menuIdx < static_cast<int>(menuMsgs.size())
+                             && menuMsgs.at(menuIdx).plaintext().startsWith(QChar(0x21AA));
     QAction* revokeAction       = isForwarded ? menu.addAction(tr("Revoke access…")) : nullptr;
 
     const QAction* chosen       = menu.exec(m_thread->mapToGlobal(pos));
@@ -892,47 +859,46 @@ void MainWindow::onThreadContextMenu(const QPoint& pos)
     if (chosen == forwardAction)     { onForwardSingle(row);    return; }
     if (chosen == saveMessageAction) { onDownloadSingle(row);   return; }
     if (chosen == saveConvoAction) {
-        saveMessagesToFile(m_threads.value(m_activeContact),
+        saveMessagesToFile(m_store.messagesFor(m_activeContact.toStdString()),
                            QStringLiteral("conversation_with_%1.txt").arg(m_activeContact));
         return;
     }
     if (chosen != deleteAction)  { return; }
 
     // --- Delete single message ---
-    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
-    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int start = qMax(0, all.size() - limit);
+    const std::vector<Message>& all = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int limit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int start = qMax(0, static_cast<int>(all.size()) - limit);
     const int idx   = start + row;
-    if (idx < 0 || idx >= all.size()) return;
+    if (idx < 0 || idx >= static_cast<int>(all.size())) return;
 
-    const ThreadMessage& msg = all.at(idx);
-    if (msg.id.isEmpty()) {
+    const QString msgId = all.at(idx).id();
+    if (msgId.isEmpty()) {
         QMessageBox::warning(this, tr("Cannot delete"),
                              tr("This message has no server ID and cannot be deleted remotely."));
         return;
     }
 
-    const QString err = m_client->deleteMessage(msg.id);
+    const QString err = m_client->deleteMessage(msgId);
     if (!err.isEmpty()) {
         QMessageBox::warning(this, tr("Delete failed"), err);
         return;
     }
 
-    m_seenMessageIds.remove(msg.id);
-    m_threads[m_activeContact].removeAt(idx);
+    m_store.removeMessageById(msgId.toStdString());
     saveHistory();
     renderActiveThread();
 }
 
 void MainWindow::onRevokeAccess(int row)
 {
-    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
-    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int start = qMax(0, all.size() - limit);
+    const std::vector<Message>& all = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int limit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int start = qMax(0, static_cast<int>(all.size()) - limit);
     const int idx   = start + row;
-    if (idx < 0 || idx >= all.size()) return;
+    if (idx < 0 || idx >= static_cast<int>(all.size())) return;
 
-    const QString msgId = all.at(idx).id;
+    const QString msgId = all.at(idx).id();
     if (msgId.isEmpty()) {
         QMessageBox::warning(this, tr("Cannot revoke"),
                              tr("This message has no server ID and cannot be revoked."));
@@ -965,10 +931,12 @@ void MainWindow::onRevokeAccess(int row)
 QString MainWindow::pickForwardTarget(const QString& excludeUsername)
 {
     // Build contact list from everyone we have a thread with, minus current contact.
+    // contactUsernames() returns std::vector<std::string>, already sorted.
     QStringList contacts;
-    for (const QString& c : m_threads.keys())
-        if (c != excludeUsername) contacts << c;
-    contacts.sort(Qt::CaseInsensitive);
+    for (const std::string& c : m_store.contactUsernames()) {
+        const QString cu = QString::fromStdString(c);
+        if (cu != excludeUsername) contacts << cu;
+    }
 
     bool ok = false;
     QString target;
@@ -995,17 +963,18 @@ void MainWindow::onForwardSingle(int row)
         return;
     }
 
-    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
-    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int start = qMax(0, all.size() - limit);
+    const std::vector<Message>& all = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int limit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int start = qMax(0, static_cast<int>(all.size()) - limit);
     const int idx   = start + row;
-    if (idx < 0 || idx >= all.size()) return;
+    if (idx < 0 || idx >= static_cast<int>(all.size())) return;
 
-    // Client-side re-encryption — decrypt already in m_threads, re-encrypt fresh.
-    const ThreadMessage& msg = all.at(idx);
-    const QString origSender = msg.fromMe ? m_client->username() : msg.sender;
+    // Client-side re-encryption — decrypt already cached, re-encrypt fresh.
+    const Message& msg = all.at(idx);
+    const QString origSender = (msg.direction() == Message::Direction::Sent)
+                                   ? m_client->username() : msg.senderUsername();
     const QString fwdText = QChar(0x21AA) + QStringLiteral(" from ")
-                            + origSender + QStringLiteral(": ") + msg.text;
+                            + origSender + QStringLiteral(": ") + msg.plaintext();
     if (sendTextToContact(target, fwdText))
         QMessageBox::information(this, tr("Forwarded"),
                                  tr("Message forwarded to %1.").arg(target));
@@ -1025,20 +994,23 @@ void MainWindow::onSelectionForwardClicked()
         return;
     }
 
-    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
-    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int start = qMax(0, all.size() - limit);
+    // Snapshot copy: sendTextToContact() below may insert a new conversation
+    // into the store and rehash it, which would invalidate a live reference.
+    const std::vector<Message> all = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int limit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int start = qMax(0, static_cast<int>(all.size()) - limit);
 
     // The first call may do X3DH (establishing a session); subsequent calls in
     // this loop use the ratchet session created by the first.
     int successCount = 0;
     for (const QListWidgetItem* item : selected) {
         const int idx = start + m_thread->row(item);
-        if (idx < 0 || idx >= all.size()) continue;
-        const ThreadMessage& msg = all.at(idx);
-        const QString origSender = msg.fromMe ? m_client->username() : msg.sender;
+        if (idx < 0 || idx >= static_cast<int>(all.size())) continue;
+        const Message& msg = all.at(idx);
+        const QString origSender = (msg.direction() == Message::Direction::Sent)
+                                       ? m_client->username() : msg.senderUsername();
         const QString fwdText = QChar(0x21AA) + QStringLiteral(" from ")
-                                + origSender + QStringLiteral(": ") + msg.text;
+                                + origSender + QStringLiteral(": ") + msg.plaintext();
         if (!sendTextToContact(target, fwdText)) {
             exitSelectionMode();
             return;
@@ -1055,10 +1027,10 @@ void MainWindow::onSelectionForwardClicked()
 // Download / save to .txt
 // ---------------------------------------------------------------------------
 
-void MainWindow::saveMessagesToFile(const QList<ThreadMessage>& messages,
+void MainWindow::saveMessagesToFile(const std::vector<Message>& messages,
                                     const QString& defaultName)
 {
-    if (messages.isEmpty()) return;
+    if (messages.empty()) return;
 
     const QString path = QFileDialog::getSaveFileName(
         this, tr("Save messages"), defaultName,
@@ -1074,14 +1046,15 @@ void MainWindow::saveMessagesToFile(const QList<ThreadMessage>& messages,
 
     QTextStream out(&f);
     out.setEncoding(QStringConverter::Utf8);
-    for (const ThreadMessage& m : messages) {
-        // Parse ISO-8601 timestamp into a readable local time string.
-        QDateTime dt = QDateTime::fromString(m.ts, Qt::ISODate);
+    for (const Message& m : messages) {
+        // Render the stored timestamp into a readable local time string.
+        const QDateTime dt = m.createdAt();
         const QString ts = dt.isValid()
             ? dt.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
-            : m.ts;
-        const QString sender = m.fromMe ? m_client->username() : m.sender;
-        out << QStringLiteral("[%1] %2: %3\n").arg(ts, sender, m.text);
+            : dt.toString(Qt::ISODate);
+        const QString sender = (m.direction() == Message::Direction::Sent)
+                                   ? m_client->username() : m.senderUsername();
+        out << QStringLiteral("[%1] %2: %3\n").arg(ts, sender, m.plaintext());
     }
     f.close();
 }
@@ -1089,14 +1062,14 @@ void MainWindow::saveMessagesToFile(const QList<ThreadMessage>& messages,
 void MainWindow::onDownloadSingle(int row)
 {
     if (m_activeContact.isEmpty()) return;
-    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
-    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int start = qMax(0, all.size() - limit);
+    const std::vector<Message>& all = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int limit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int start = qMax(0, static_cast<int>(all.size()) - limit);
     const int idx   = start + row;
-    if (idx < 0 || idx >= all.size()) return;
+    if (idx < 0 || idx >= static_cast<int>(all.size())) return;
 
-    QList<ThreadMessage> single;
-    single.append(all.at(idx));
+    std::vector<Message> single;
+    single.push_back(all.at(idx));
     saveMessagesToFile(single,
         QStringLiteral("message_%1.txt").arg(
             QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))));
@@ -1108,21 +1081,21 @@ void MainWindow::onSelectionDownloadClicked()
     const QList<QListWidgetItem*> selected = m_thread->selectedItems();
     if (selected.isEmpty()) return;
 
-    const QList<ThreadMessage>& all = m_threads.value(m_activeContact);
-    const int limit = m_renderLimit.value(m_activeContact, kPageSize);
-    const int start = qMax(0, all.size() - limit);
+    const std::vector<Message>& all = m_store.conversation(m_activeContact.toStdString()).messages;
+    const int limit = m_store.conversation(m_activeContact.toStdString()).renderLimit;
+    const int start = qMax(0, static_cast<int>(all.size()) - limit);
 
     QList<int> indices;
     for (const QListWidgetItem* item : selected) {
         const int idx = start + m_thread->row(item);
-        if (idx >= 0 && idx < all.size())
+        if (idx >= 0 && idx < static_cast<int>(all.size()))
             indices.append(idx);
     }
     std::sort(indices.begin(), indices.end());
 
-    QList<ThreadMessage> toSave;
+    std::vector<Message> toSave;
     for (int idx : indices)
-        toSave.append(all.at(idx));
+        toSave.push_back(all.at(idx));
 
     saveMessagesToFile(toSave,
         QStringLiteral("selected_messages_%1_%2.txt")

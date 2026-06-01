@@ -20,14 +20,17 @@
 #include <QtCore/QList>
 #include <QtCore/QString>
 #include <memory>
+#include <optional>
 #include <string>
+
+#include "User.hpp"
 
 class CryptoDaemonClient;
 
 class Client
 {
 public:
-    explicit Client(std::shared_ptr<CryptoDaemonClient> daemon);
+    explicit Client(std::unique_ptr<CryptoDaemonClient> daemon);
     ~Client();
 
     Client(const Client&) = delete;
@@ -104,6 +107,12 @@ public:
     bool isAuthenticated()        const { return !m_csrfToken.isEmpty(); }
     CryptoDaemonClient* daemon()  const { return m_daemon.get(); }
 
+    // --- Current user (public identity only; private keys live in the daemon) ---
+    bool hasCurrentUser() const { return m_currentUser.has_value(); }
+    const User& currentUser() const { return m_currentUser.value(); }
+    void setCurrentUser(User u) { m_currentUser = std::move(u); }
+    void clearCurrentUser() { m_currentUser.reset(); }
+
     /** wss:// URL of the real-time delivery socket on the same host as the API. */
     QString websocketUrl() const { return QStringLiteral("wss://") + m_baseHostname + QStringLiteral("/ws"); }
 
@@ -125,7 +134,9 @@ private:
     QString m_baseUrl      = QStringLiteral("https://alpha-and-the-cryptmunks.theburkenator.com");
     QString m_baseHostname = QStringLiteral("alpha-and-the-cryptmunks.theburkenator.com");
 
-    std::shared_ptr<CryptoDaemonClient> m_daemon;
+    std::unique_ptr<CryptoDaemonClient> m_daemon;
+
+    std::optional<User> m_currentUser;
 
     QString m_username;
     QString m_csrfToken;

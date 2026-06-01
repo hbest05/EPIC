@@ -20,6 +20,7 @@
 #include "Client.hpp"
 #include "CryptoDaemonClient.hpp"
 #include "TLSVerifier.hpp"
+#include "User.hpp"
 
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -101,7 +102,11 @@ void LoginWindow::onLoginClicked()
     }
 
     try {
-        m_client->daemon()->loadIdentity(pass);
+        const CryptoDaemonClient::Identity identity = m_client->daemon()->loadIdentity(pass);
+        User loggedInUser(user);
+        loggedInUser.setX25519PublicKey(identity.ikPub);
+        loggedInUser.setEd25519PublicKey(identity.signPub);
+        m_client->setCurrentUser(std::move(loggedInUser));
     } catch (const CryptoDaemonError& e) {
         m_statusLabel->setText(tr("Server signed in but local key unlock failed: %1")
                                .arg(e.message()));
@@ -168,6 +173,11 @@ void LoginWindow::onRegisterClicked()
         m_statusLabel->setText(tr("Account created, but prekey upload failed: %1").arg(err));
         return;
     }
+
+    User newUser(user);
+    newUser.setX25519PublicKey(identity.ikPub);
+    newUser.setEd25519PublicKey(identity.signPub);
+    m_client->setCurrentUser(std::move(newUser));
 
     m_statusLabel->setText(tr("Welcome, %1.").arg(user));
     emit loginSucceeded(true);

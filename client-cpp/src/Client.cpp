@@ -33,7 +33,7 @@ size_t writeToByteArray(char* ptr, size_t size, size_t nmemb, void* userdata)
 
 } // namespace
 
-Client::Client(std::shared_ptr<CryptoDaemonClient> daemon)
+Client::Client(std::unique_ptr<CryptoDaemonClient> daemon)
     : m_daemon(std::move(daemon))
 {
 }
@@ -254,6 +254,7 @@ void Client::logout()
                       QByteArrayLiteral("{}"));
     m_csrfToken.clear();
     m_username.clear();
+    clearCurrentUser();
     if (!m_cookieJarPath.empty()) {
         QFile::remove(QString::fromStdString(m_cookieJarPath));
     }
@@ -274,6 +275,7 @@ QString Client::uploadPrekeys(const QByteArray& spkPub,
     spk.insert(QStringLiteral("signature"),  QString::fromUtf8(spkSig.toBase64()));
 
     QJsonArray opkArr;
+    // Sequential index required for key_id assignment — raw loop intentional over std::transform
     for (int i = 0; i < opks.size(); ++i) {
         QJsonObject o;
         o.insert(QStringLiteral("key_id"),     static_cast<double>(spkKeyId * 100 + i));

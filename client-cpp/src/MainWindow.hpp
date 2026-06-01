@@ -11,10 +11,13 @@
  * fallback to catch messages that arrived while offline.
  */
 
-#include <QtCore/QHash>
-#include <QtCore/QSet>
 #include <QtCore/QString>
 #include <QtWidgets/QMainWindow>
+
+#include <vector>
+
+#include "Message.hpp"
+#include "MessageStore.hpp"
 
 class Client;
 class QJsonObject;
@@ -63,19 +66,6 @@ private slots:
     void onWsTextMessage(const QString& text);
 
 private:
-    /** One displayed message in a conversation thread. Persisted to the local
-     *  plaintext history cache so threads survive a client restart — the
-     *  Double Ratchet consumes message keys on first decrypt, so server
-     *  ciphertext cannot be re-decrypted later. */
-    struct ThreadMessage
-    {
-        QString id;
-        bool    fromMe = false;
-        QString sender;     ///< username of the sender (us, or the contact)
-        QString text;
-        QString ts;         ///< ISO-8601 timestamp for ordering
-    };
-
     /** Bind the active contact and refresh the thread view. */
     void selectContact(const QString& username);
 
@@ -91,7 +81,7 @@ private:
     void ensureContact(const QString& username);
 
     /** Record a message in the in-memory thread map and (optionally) persist. */
-    void appendMessage(const QString& contact, const ThreadMessage& msg, bool persist = true);
+    void appendMessage(const QString& contact, const Message& msg, bool persist = true);
 
     /** Repaint the thread view for the active contact, honouring the
      *  per-contact render window used by "Load older messages". */
@@ -148,26 +138,15 @@ private:
 
     /** Write messages to a .txt file chosen via a save dialog.
      *  defaultName is suggested in the file chooser. */
-    void saveMessagesToFile(const QList<ThreadMessage>& messages,
+    void saveMessagesToFile(const std::vector<Message>& messages,
                             const QString& defaultName);
 
     QString m_activeContact;
 
-    /** Per-contact Double Ratchet session id, returned by the daemon. */
-    QHash<QString, QString> m_sessions;
-    /** Inbox ids we've already rendered, to keep polling idempotent. */
-    QSet<QString> m_seenMessageIds;
-    /** True once the first outgoing message of a session has been sent;
-     *  controls whether to ship the X3DH initiator header. */
-    QHash<QString, bool> m_sentFirstMessage;
-
-    /** Full decrypted history per contact, oldest first. */
-    QHash<QString, QList<ThreadMessage>> m_threads;
-    /** How many trailing messages to show per contact; grows on "Load older". */
-    QHash<QString, int> m_renderLimit;
-    /** Server id of the newest inbox message we've processed — the cursor for
-     *  incremental polling (?after=<id>). */
-    QString m_lastInboxId;
+    /** Owns all per-contact conversation state (session id, first-message
+     *  flag, render window, decrypted history), the seen-id set, and the
+     *  incremental-poll cursor. */
+    MessageStore m_store;
 
     static constexpr int kPageSize = 30;
 

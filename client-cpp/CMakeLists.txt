@@ -40,6 +40,7 @@ set(SOURCES
     src/Message.cpp
     src/User.cpp
     src/MessageStore.cpp
+    src/MessageItemDelegate.cpp
     src/CryptoDaemonClient.cpp
     src/NetworkUtils.cpp
     src/TLSVerifier.cpp
@@ -52,6 +53,7 @@ set(HEADERS
     src/Message.hpp
     src/User.hpp
     src/MessageStore.hpp
+    src/MessageItemDelegate.hpp
     src/CryptoDaemonClient.hpp
     src/NetworkUtils.hpp
     src/TLSVerifier.hpp
