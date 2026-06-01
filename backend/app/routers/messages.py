@@ -23,6 +23,7 @@ from app.database import get_db
 from app.models.message import Message
 from app.models.user import User
 from app.schemas.message import (
+    HideResponse,
     MessageResponse,
     SendMessageRequest,
     SendMessageResponse,
@@ -324,6 +325,7 @@ async def get_sent(
         select(Message, User.username)
         .join(User, User.id == Message.recipient_id)
         .where(Message.sender_id == current_user.id)
+        .where(Message.deleted_for_sender == False)  # noqa: E712
     )
 
     if with_user is not None:
@@ -444,3 +446,34 @@ async def revoke_message(
         {"type": "message_deleted", "message_id": str(msg.id)},
     )
     return {"revoked": True}
+
+
+# ---------------------------------------------------------------------------
+# POST /{message_id}/hide
+# ---------------------------------------------------------------------------
+
+@router.post("/{message_id}/hide", response_model=HideResponse)
+async def hide_message(
+    message_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession  = Depends(get_db),
+):
+    """Hide a single message from the sender's own view only ("delete for me").
+
+    Only the original sender may call this. Sets deleted_for_sender = True;
+    the row is kept so the recipient is unaffected. get_sent filters it out.
+    No WebSocket event is pushed — this action is invisible to the recipient.
+    """
+    result = await db.execute(select(Message).where(Message.id == message_id))
+    msg = result.scalar_one_or_none()
+    if msg is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    if msg.sender_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the sender may hide this message.",
+        )
+
+    msg.deleted_for_sender = True
+    return {"hidden": True}

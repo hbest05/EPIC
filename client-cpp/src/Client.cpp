@@ -323,6 +323,18 @@ QString Client::revokeAccess(const QString& messageId)
         QStringLiteral("revoke failed (HTTP %1)").arg(m_lastStatus));
 }
 
+QString Client::hideMessage(const QString& messageId)
+{
+    const QByteArray resp = httpRequest(QStringLiteral("POST"),
+                                        QStringLiteral("/api/messages/") + messageId + QStringLiteral("/hide"),
+                                        QByteArrayLiteral("{}"));
+    if (m_lastStatus == 200) return {};
+    if (!m_lastError.isEmpty()) return m_lastError;
+    const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+    return obj.value(QStringLiteral("detail")).toString(
+        QStringLiteral("hide failed (HTTP %1)").arg(m_lastStatus));
+}
+
 QString Client::sendMessage(const QString& recipient,
                             const QByteArray& ciphertext,
                             const QByteArray& nonce,

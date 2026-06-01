@@ -64,6 +64,11 @@ public:
      *  @returns empty string on success, error message on failure. */
     QString revokeAccess(const QString& messageId);
 
+    /** Hide a single message from the sender's own view only
+     *  via POST /messages/<messageId>/hide. Only the sender may do this.
+     *  @returns empty string on success, error message on failure. */
+    QString hideMessage(const QString& messageId);
+
     // --- Messages ---
 
     /** POST /messages/send with Double Ratchet header fields.

@@ -37,6 +37,7 @@ class Message(Base):
     blockchain_batch_index = Column(Integer, nullable=True)
     forwarded_from_id = Column(UUID(as_uuid=True), nullable=True)
     deleted_for_recipient = Column(Boolean, nullable=False, default=False, server_default=func.false())
+    deleted_for_sender = Column(Boolean, nullable=False, default=False, server_default=func.false())
 
     # Double Ratchet header fields — populated by the sending ratchet service
     ratchet_public_key = Column(String(512), nullable=True)        # sender's DH ratchet key (base64)

@@ -77,6 +77,14 @@ class MessageResponse(BaseModel):
 # Blockchain verification
 # ---------------------------------------------------------------------------
 
+class HideResponse(BaseModel):
+    hidden: bool
+
+
+# ---------------------------------------------------------------------------
+# Blockchain verification
+# ---------------------------------------------------------------------------
+
 class BlockchainVerifyResponse(BaseModel):
     conversation_id: str
     record_index: int
