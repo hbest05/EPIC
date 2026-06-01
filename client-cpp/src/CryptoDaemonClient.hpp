@@ -22,6 +22,7 @@
 #include <QtCore/QString>
 #include <stdexcept>
 #include <cstdint>
+#include <memory>
 
 #ifndef DAEMON_PORT
 #  define DAEMON_PORT 47291
@@ -193,6 +194,6 @@ private:
      *  transport failure or `status != "ok"`. */
     QJsonObject call(const QString& op, const QJsonObject& params);
 
-    QTcpSocket* m_socket;
+    std::unique_ptr<QTcpSocket> m_socket;
     QByteArray  m_recvBuf;
 };

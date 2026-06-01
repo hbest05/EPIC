@@ -93,17 +93,23 @@ EPIC/
 │   └── styles.css             Placeholder dark-theme stylesheet
 │
 ├── client-cpp/                Qt6 desktop client
-│   ├── CMakeLists.txt         Build system (Qt6 + libcurl)
+│   ├── CMakeLists.txt         Build system (Qt6 + libcurl + OpenSSL + libsodium)
 │   └── src/
-│       ├── main.cpp           Entry point — launch window
-│       ├── Client.hpp/.cpp    Main window + HTTP controller (libcurl)
-│       ├── User.hpp/.cpp      User identity + keypair (sodium_malloc)
-│       ├── Message.hpp/.cpp   Encrypted message data holder
-│       └── MessageStore.hpp/.cpp  Message cache only, no crypto
+│       ├── main.cpp                   Entry point — launches the login window
+│       ├── Client.hpp/.cpp           REST/HTTP controller (libcurl) — talks to the FastAPI backend
+│       ├── CryptoDaemonClient.hpp/.cpp  TCP client for the local crypto daemon
+│       ├── User.hpp/.cpp             User identity + public keys
+│       ├── Message.hpp/.cpp          Encrypted message data holder
+│       ├── MessageStore.hpp/.cpp     Per-contact conversation cache (no crypto)
+│       ├── MessageItemDelegate.hpp/.cpp  Custom painter for message-thread rows
+│       ├── NetworkUtils.hpp/.cpp     Cross-platform BSD-socket helpers
+│       ├── TLSVerifier.hpp/.cpp      Standalone OpenSSL certificate check
+│       ├── LoginWindow.hpp/.cpp      Login / register UI window
+│       └── MainWindow.hpp/.cpp       Main chat UI window
 │
 ├── crypto-daemon/             Python service handling X3DH, Double Ratchet,
 │                              key storage; runs locally alongside the C++ client
-│                              and exposes a Unix domain socket
+│                              and listens on TCP 127.0.0.1:DAEMON_PORT (see CryptoDaemonClient)
 │
 ├── blockchain/                Hardhat project (Solidity / Ethereum)
 │   ├── package.json
@@ -127,7 +133,7 @@ EPIC/
 |---|---|
 | Backend | Python 3.12+, Docker Engine + Compose v2 (v2.27.0+) — spins up FastAPI, PostgreSQL 16, Redis 7 |
 | Frontend | Any modern browser (Chrome 133+ / Firefox 130+ for X25519) |
-| C++ client | Qt 6.6+, CMake 3.20+, libcurl |
+| C++ client | Qt 6.6+ (Core, Widgets, Network, **WebSockets**), CMake 3.20+, libcurl, OpenSSL, libsodium (vcpkg port `unofficial-sodium`) |
 | Blockchain | Node.js 20+, npm |
 | Crypto Daemon | Python 3.12+, cryptography package |
 
@@ -222,9 +228,18 @@ cmake --build . --parallel
 ./SecureMsg
 ```
 
+To run two clients on one host, point a second build at a second daemon instance by
+passing the daemon's TCP port at configure time:
+
+```bash
+cmake .. -DDAEMON_PORT=47292   # default is 47291
+```
+
 **Dependencies (install first):**
-- **Qt6**: Download from qt.io or `winget install Qt.Qt.6.6.3` on Windows
+- **Qt6** (including the **WebSockets** module): Download from qt.io or `winget install Qt.Qt.6.6.3` on Windows
 - **libcurl**: `brew install curl` / `apt install libcurl4-openssl-dev` / `vcpkg install curl`
+- **OpenSSL**: `brew install openssl` / `apt install libssl-dev` / `vcpkg install openssl`
+- **libsodium** (CMake finds it via the vcpkg port `unofficial-sodium`): `vcpkg install libsodium`
 
 ---
 

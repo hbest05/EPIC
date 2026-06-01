@@ -44,7 +44,27 @@
       "Read(//c/c/Users/m4tth/EPIC/client-cpp/build-47292/**)",
       "Bash(cmake -G Ninja -DCMAKE_CXX_COMPILER=C:/mingw64/bin/c++.exe -DCMAKE_PREFIX_PATH=C:/Qt/6.11.1/mingw_64 -B b)",
       "Bash(cmake --build b)",
-      "Bash(python -m py_compile app/routers/messages.py)"
+      "Bash(python -m py_compile app/routers/messages.py)",
+      "Bash(python -m py_compile app/routers/ws.py)",
+      "Bash(git rm *)",
+      "Bash(echo \"rm exit: $?\")",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(ssh student@200.69.13.70 -p 2202 \"cd ~/epic && docker compose restart api\")",
+      "Bash(ssh student@200.69.13.70 -p 2202 \"ls ~ && find ~ -maxdepth 3 -name docker-compose.yml -o -maxdepth 3 -name compose.yml -o -maxdepth 3 -name docker-compose.yaml 2>/dev/null\")",
+      "Bash(ssh student@200.69.13.70 -p 2202 \"cd ~/EPIC && docker compose restart api\")",
+      "PowerShell(cmake --build \"c:\\\\Users\\\\m4tth\\\\EPIC\\\\client-cpp\\\\build-47292\" --config Release)",
+      "PowerShell(cmake --build \"c:\\\\Users\\\\m4tth\\\\EPIC\\\\client-cpp\\\\build\" --config Release)",
+      "Bash(ssh student@200.69.13.70 -p 2202 \"cd ~/EPIC && git pull && docker compose up --build -d api\")",
+      "Bash(ssh student@200.69.13.70 -p 2202 \"cd ~/EPIC && docker compose logs --tail=6 api\")",
+      "Bash(ssh student@200.69.13.70 -p 2202 \"cd ~/EPIC && docker compose logs --tail=4 api\")",
+      "PowerShell(python -m py_compile crypto-daemon/double_ratchet.py)",
+      "PowerShell(node --check frontend/crypto.js)",
+      "PowerShell(if \\($?\\) { \"double_ratchet.py OK\" })",
+      "PowerShell(if \\($?\\) { \"crypto.js OK\" })",
+      "Bash(cmake --build build)",
+      "Bash(cmake --build /c/Users/m4tth/EPIC/client-cpp/build)"
     ]
   }
 }

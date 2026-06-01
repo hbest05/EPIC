@@ -10,6 +10,8 @@
 
 #include "CryptoDaemonClient.hpp"
 
+#include <algorithm>
+
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonValue>
@@ -34,13 +36,12 @@ QString b64encode(const QByteArray& bytes)
 CryptoDaemonClient::CryptoDaemonClient(const QString& host,
                                        uint16_t port,
                                        int connectTimeoutMs)
-    : m_socket(new QTcpSocket())
+    : m_socket(std::make_unique<QTcpSocket>())
 {
     m_socket->connectToHost(host, port);
     if (!m_socket->waitForConnected(connectTimeoutMs)) {
         const QString err = m_socket->errorString();
-        delete m_socket;
-        m_socket = nullptr;
+        m_socket.reset();
         throw CryptoDaemonError(
             QStringLiteral("transport"),
             QStringLiteral("crypto daemon connect failed: %1").arg(err));
@@ -53,7 +54,6 @@ CryptoDaemonClient::~CryptoDaemonClient()
 {
     if (m_socket) {
         m_socket->disconnectFromHost();
-        delete m_socket;
     }
 }
 
@@ -145,14 +145,15 @@ QList<CryptoDaemonClient::SessionInfo> CryptoDaemonClient::listSessions()
     QList<SessionInfo> out;
     const QJsonArray arr = data.value(QStringLiteral("sessions")).toArray();
     out.reserve(arr.size());
-    for (const QJsonValue& v : arr) {
-        const QJsonObject o = v.toObject();
-        SessionInfo info;
-        info.sessionId  = o.value(QStringLiteral("session_id")).toString();
-        info.peerUserId = o.value(QStringLiteral("peer_user_id")).toString();
-        info.role       = o.value(QStringLiteral("role")).toString();
-        out.append(info);
-    }
+    std::transform(arr.begin(), arr.end(), std::back_inserter(out),
+        [](const QJsonValue& v) {
+            const QJsonObject o = v.toObject();
+            SessionInfo info;
+            info.sessionId  = o.value(QStringLiteral("session_id")).toString();
+            info.peerUserId = o.value(QStringLiteral("peer_user_id")).toString();
+            info.role       = o.value(QStringLiteral("role")).toString();
+            return info;
+        });
     return out;
 }
 
@@ -169,9 +170,21 @@ PrekeyBundle CryptoDaemonClient::generatePrekeys(const QByteArray& signPub)
     out.spkSig = b64decode(data.value(QStringLiteral("spk_sig")));
     const QJsonArray opks = data.value(QStringLiteral("opks")).toArray();
     out.opks.reserve(opks.size());
-    for (const QJsonValue& v : opks) {
-        out.opks.append(QByteArray::fromBase64(v.toString().toUtf8()));
+    std::transform(opks.begin(), opks.end(), std::back_inserter(out.opks),
+        [](const QJsonValue& v) {
+            return QByteArray::fromBase64(v.toString().toUtf8());
+        });
+
+    // Guard against a malformed daemon response: an empty OPK public key would
+    // be silently uploaded and later fail every X3DH handshake that consumed it.
+    const bool hasEmptyOpk = std::any_of(out.opks.cbegin(), out.opks.cend(),
+        [](const QByteArray& opk) { return opk.isEmpty(); });
+    if (hasEmptyOpk) {
+        throw CryptoDaemonError(
+            QStringLiteral("internal"),
+            QStringLiteral("daemon returned an empty one-time prekey"));
     }
+
     return out;
 }
 
