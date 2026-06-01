@@ -61,6 +61,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   attachEventListeners();
 });
 
+// Handle bfcache restore — browser may show a frozen snapshot on back-nav
+// without re-running DOMContentLoaded. Re-check session state and clear forms.
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted) {
+    showAuth();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
@@ -189,6 +197,12 @@ async function register() {
     await storePrivateKey("spk",         spkKP.privateKey);
     await storePrivateKey("spk_pub_b64", spkPubB64);
 
+    // Login first so the auth cookie is set before uploading prekeys.
+    currentUser = await apiFetch("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password, client_type: "web" }),
+    });
+
     // Generate 10 OPKs (private keys stored in IndexedDB by generateOPKs).
     const opks  = await generateOPKs(10);
     const keyId = Math.floor(Date.now() / 1000);
@@ -210,11 +224,6 @@ async function register() {
       }),
     });
 
-    // Auto-login.
-    currentUser = await apiFetch("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password, client_type: "web" }),
-    });
     myPrivateKey   = x25519Priv;
     mySigningKey   = ed25519Priv;
     myPublicKeyB64 = x25519PubB64;
@@ -460,6 +469,19 @@ function stopInboxPoller() {
 function showAuth() {
   document.getElementById("auth-section").style.display = "block";
   document.getElementById("app-section").style.display  = "none";
+
+  // Clear all credential fields so they are never visible after logout/back-nav.
+  ["login-username", "login-password",
+   "reg-username", "reg-email", "reg-password"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+
+  // Always land on the login form, not the register form.
+  const loginForm    = document.getElementById("login-form");
+  const registerForm = document.getElementById("register-form");
+  if (loginForm)    loginForm.style.display    = "block";
+  if (registerForm) registerForm.style.display = "none";
 }
 
 function showApp() {
@@ -577,5 +599,6 @@ async function apiFetch(path, options = {}) {
     throw new Error(err.detail || `HTTP ${res.status}`);
   }
 
+  if (res.status === 204) return null;
   return res.json();
 }
