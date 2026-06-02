@@ -3,8 +3,8 @@
 A local Python process that handles every cryptographic operation for the
 SecureMsg client — identity keys, X3DH key agreement, the Double Ratchet,
 and at-rest key/session encryption. The C++ Qt UI never touches a private
-key; it talks to this daemon over a Unix domain socket (or named pipe on
-Windows) using line-delimited JSON.
+key; it talks to this daemon over a TCP loopback socket (127.0.0.1:47291)
+using newline-delimited JSON.
 
 The daemon is long-running and stateful: identity and Double Ratchet
 sessions live in memory for the lifetime of the process and are
@@ -15,13 +15,10 @@ persisted, encrypted, to `~/.securemsg/` so they survive restarts.
 ```
 pip install -r requirements.txt
 python main.py                # bind to default address
-python main.py --address /tmp/securemsg-crypto.sock     # POSIX
-python main.py --address \\.\pipe\securemsg-crypto       # Windows
+python main.py --address 127.0.0.1:47292
 ```
 
-Default address:
-- POSIX:   `/tmp/securemsg-crypto.sock` (AF_UNIX stream, mode 0600)
-- Windows: `\\.\pipe\securemsg-crypto`  (named pipe via `multiprocessing.connection`)
+Default address: `127.0.0.1:47291` — TCP loopback, never reachable from the network.
 
 ## Files written
 
@@ -36,9 +33,8 @@ sees only ciphertext.
 
 ## Wire protocol
 
-One JSON object per message. On POSIX each request is a single line ending
-in `\n`; on Windows each request is one length-prefixed `send_bytes` frame
-(stdlib `multiprocessing.connection` handles framing).
+One JSON object per message. Each request is a single line ending in `\n`
+on both POSIX and Windows. The TCP framing is identical on all platforms.
 
 ### Request
 ```json

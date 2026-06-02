@@ -1,7 +1,7 @@
 """
 main.py — crypto-daemon entry point.
 
-Accepts connections on a Unix domain socket (POSIX) or named pipe (Windows),
+Accepts connections on a TCP loopback socket (127.0.0.1:47291 by default),
 reads framed JSON requests, dispatches them through handlers.handle(), and
 writes the JSON response back on the same connection. One connection may
 issue many sequential requests.
@@ -54,7 +54,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="SecureMsg crypto daemon")
     parser.add_argument(
         "--address",
-        help="socket path (POSIX) or pipe name (Windows); default is platform standard",
+        help="TCP address as host:port (default: 127.0.0.1:47291)",
     )
     args = parser.parse_args()
 
