@@ -162,6 +162,53 @@ def generate(passphrase: str) -> Identity:
     return Identity(ik_priv, sign_priv, wrap_key)
 
 
+def save(identity: Identity, passphrase: str) -> None:
+    """Re-encrypt an existing in-memory identity under a new passphrase.
+
+    Does NOT generate new keypairs — the X25519 IK and Ed25519 signing key
+    in `identity` are preserved exactly. Only the at-rest encryption changes:
+    a fresh salt and nonce are drawn, a new wrap key is derived, the private
+    keys are re-serialised and encrypted, and the file is rewritten atomically.
+    `identity.wrap_key` is updated in-place so the in-memory state stays
+    consistent with the new file (e.g. for re-encrypting session/OPK/SPK state).
+    """
+    # Fresh salt every time — never reuse the existing one.
+    salt = secrets.token_bytes(SALT_LEN)
+    new_wrap_key = derive_wrap_key(passphrase, salt)
+
+    blob_bytes = json.dumps(
+        {
+            "ik_priv": base64.b64encode(_raw_priv_x(identity.ik_priv)).decode(),
+            "sign_priv": base64.b64encode(_raw_priv_ed(identity.sign_priv)).decode(),
+        }
+    ).encode("utf-8")
+    nonce = secrets.token_bytes(NONCE_LEN)
+    ct = AESGCM(new_wrap_key).encrypt(nonce, blob_bytes, IDENTITY_AAD)
+
+    # Best-effort zero of the JSON buffer (the bytes object itself is immutable
+    # but at least the bytearray copy we hold is wiped).
+    buf = bytearray(blob_bytes)
+    _secure_zero(buf)
+
+    path = identity_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".enc.tmp")
+    with open(tmp, "wb") as f:
+        f.write(MAGIC)
+        f.write(bytes([VERSION]))
+        f.write(salt)
+        f.write(nonce)
+        f.write(ct)
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+    # Keep in-memory state consistent with the freshly written file.
+    identity.wrap_key = new_wrap_key
+
+
 def load(passphrase: str) -> Identity:
     """Read the identity file, derive wrap key, decrypt private keys."""
     path = identity_path()

@@ -160,6 +160,12 @@ public:
      *  peer-username -> session-id map across restarts. */
     QList<SessionInfo> listSessions();
 
+    /** Re-encrypt the loaded identity and all session files under a new
+     *  passphrase. Does not generate new keypairs — only the at-rest
+     *  encryption changes. The passphrase is never logged.
+     *  @throws CryptoDaemonError on failure. */
+    void rekeyIdentity(const QString& newPassphrase);
+
     // --- Prekeys ---
 
     /** Generate a new Signed Prekey and 10 One-Time Prekeys.

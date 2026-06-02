@@ -36,7 +36,10 @@
 #include <QtWebSockets/QWebSocket>
 #include <QtWidgets/QHBoxLayout>
 #include <algorithm>
+#include <QtWidgets/QDialog>
+#include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFileDialog>
+#include <QtWidgets/QFormLayout>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
@@ -81,6 +84,7 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     , m_compose(new QLineEdit(this))
     , m_sendButton(new QPushButton(tr("Send"), this))
     , m_addContactButton(new QPushButton(tr("Add contact"), this))
+    , m_changePasswordButton(new QPushButton(tr("Change Password"), this))
     , m_loadOlderButton(new QPushButton(tr("Load older messages"), this))
     , m_topBar(new QLabel(this))
     , m_composeWidget(new QWidget(this))
@@ -124,6 +128,7 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     auto* leftLayout = new QVBoxLayout(left);
     leftLayout->addWidget(m_addContactButton);
     leftLayout->addWidget(m_contactList);
+    leftLayout->addWidget(m_changePasswordButton);
 
     auto* right = new QWidget(this);
     auto* rightLayout = new QVBoxLayout(right);
@@ -160,6 +165,7 @@ MainWindow::MainWindow(Client* client, bool freshRegistration, QWidget* parent)
     connect(m_selectionDownloadButton, &QPushButton::clicked, this, &MainWindow::onSelectionDownloadClicked);
     connect(cancelSelButton,         &QPushButton::clicked,         this, &MainWindow::exitSelectionMode);
     connect(m_addContactButton,      &QPushButton::clicked,         this, &MainWindow::onAddContactClicked);
+    connect(m_changePasswordButton,  &QPushButton::clicked,         this, &MainWindow::onChangePasswordClicked);
     connect(m_loadOlderButton,       &QPushButton::clicked,         this, &MainWindow::onLoadOlderClicked);
     connect(m_contactList,           &QListWidget::itemClicked,     this, &MainWindow::onContactSelected);
 
@@ -339,9 +345,21 @@ void MainWindow::renderActiveThread()
 
     for (int i = start; i < static_cast<int>(all.size()); ++i) {
         const Message& m = all[i];
-        const QString label = (m.direction() == Message::Direction::Sent)
+        QString label = (m.direction() == Message::Direction::Sent)
             ? QStringLiteral("me: ") + m.plaintext()
             : QStringLiteral("%1: %2").arg(m.senderUsername(), m.plaintext());
+
+        // Append a local-time stamp: HH:mm for today, dd MMM HH:mm otherwise.
+        // A null/invalid createdAt() yields no timestamp rather than crashing.
+        const QDateTime created = m.createdAt();
+        if (created.isValid()) {
+            const QDateTime local = created.toLocalTime();
+            const QString fmt = (local.date() == QDate::currentDate())
+                ? QStringLiteral("HH:mm")
+                : QStringLiteral("dd MMM HH:mm");
+            label += QStringLiteral("  ") + local.toString(fmt);
+        }
+
         m_thread->addItem(label);
     }
 
@@ -432,6 +450,62 @@ void MainWindow::onAddContactClicked()
 
     ensureContact(name);
     selectContact(name);
+}
+
+void MainWindow::onChangePasswordClicked()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Change Password"));
+
+    auto* currentEdit = new QLineEdit(&dialog);
+    currentEdit->setEchoMode(QLineEdit::Password);
+    auto* newEdit = new QLineEdit(&dialog);
+    newEdit->setEchoMode(QLineEdit::Password);
+
+    auto* form = new QFormLayout(&dialog);
+    form->addRow(tr("Current password:"), currentEdit);
+    form->addRow(tr("New password:"),     newEdit);
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const QString current = currentEdit->text();
+    const QString next    = newEdit->text();
+
+    if (next.size() < 12) {
+        QMessageBox::warning(this, tr("Change Password"),
+                             tr("New password must be at least 12 characters."));
+        return;
+    }
+
+    // Order matters: change the server password first, then re-key the local
+    // identity/session files. Never the reverse — a successful local re-key
+    // followed by a failed server change would leave the two out of sync with
+    // no way for the user to recover the old local passphrase.
+    const QString err = m_client->changePassword(current, next);
+    if (!err.isEmpty()) {
+        QMessageBox::warning(this, tr("Change Password"), err);
+        return;
+    }
+
+    try {
+        m_client->daemon()->rekeyIdentity(next);
+    } catch (const CryptoDaemonError&) {
+        QMessageBox::warning(this, tr("Change Password"),
+                             tr("Your server password was changed successfully, but the "
+                                "local key file could not be re-encrypted under the new "
+                                "password. Please try changing your password again to "
+                                "resync your local keys."));
+        return;
+    }
+
+    QMessageBox::information(this, tr("Change Password"),
+                             tr("Your password has been updated."));
 }
 
 // ---------------------------------------------------------------------------

@@ -84,6 +84,24 @@ wrap key.
 { "ik_pub": "...", "sign_pub": "...", "sessions_loaded": 0 }
 ```
 
+### `rekey_identity`
+
+Re-encrypts the loaded identity and every loaded Double Ratchet session
+under a new passphrase. **No new keypairs are generated** — the existing
+X25519 IK and Ed25519 signing key are preserved exactly; only the at-rest
+encryption changes. A fresh salt and nonce are drawn, a new wrap key is
+derived via Argon2id, `identity.enc` is rewritten atomically, and each
+session file is re-encrypted under the new wrap key (their on-disk copies
+were encrypted under the old key). Requires a loaded identity. The
+passphrase is never logged.
+
+```json
+// request
+{ "op": "rekey_identity", "params": { "new_passphrase": "..." } }
+// response.data
+{ }
+```
+
 ### `generate_prekeys`
 
 Generates a Signed Prekey (X25519) signed with the Ed25519 IK and a batch
