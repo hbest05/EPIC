@@ -22,6 +22,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
 
 revision: str = "a1b2c3d4e5f6"
@@ -32,6 +33,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     conn = op.get_bind()
+    existing_tables = inspect(conn).get_table_names()
 
     # -------------------------------------------------------------------------
     # user_keys — add key_type; fix broken unique constraint
@@ -57,40 +59,40 @@ def upgrade() -> None:
     # -------------------------------------------------------------------------
     # ratchet_sessions — must exist before messages.session_id FK can be added
     # -------------------------------------------------------------------------
-    op.create_table(
-        "ratchet_sessions",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("local_user_id", sa.UUID(), nullable=False),
-        sa.Column("remote_user_id", sa.UUID(), nullable=False),
-        sa.Column("root_key", sa.String(512), nullable=False),
-        sa.Column("sending_chain_key", sa.String(512), nullable=True),
-        sa.Column("receiving_chain_key", sa.String(512), nullable=True),
-        sa.Column("sending_ratchet_public_key", sa.String(512), nullable=True),
-        sa.Column("receiving_ratchet_public_key", sa.String(512), nullable=True),
-        sa.Column("sending_chain_index", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("receiving_chain_index", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("previous_sending_chain_length", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(["local_user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["remote_user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "local_user_id", "remote_user_id",
-            name="uq_ratchet_sessions_local_remote",
-        ),
-        checkfirst=True,
-    )
+    if "ratchet_sessions" not in existing_tables:
+        op.create_table(
+            "ratchet_sessions",
+            sa.Column("id", sa.UUID(), nullable=False),
+            sa.Column("local_user_id", sa.UUID(), nullable=False),
+            sa.Column("remote_user_id", sa.UUID(), nullable=False),
+            sa.Column("root_key", sa.String(512), nullable=False),
+            sa.Column("sending_chain_key", sa.String(512), nullable=True),
+            sa.Column("receiving_chain_key", sa.String(512), nullable=True),
+            sa.Column("sending_ratchet_public_key", sa.String(512), nullable=True),
+            sa.Column("receiving_ratchet_public_key", sa.String(512), nullable=True),
+            sa.Column("sending_chain_index", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("receiving_chain_index", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("previous_sending_chain_length", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.ForeignKeyConstraint(["local_user_id"], ["users.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(["remote_user_id"], ["users.id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint(
+                "local_user_id", "remote_user_id",
+                name="uq_ratchet_sessions_local_remote",
+            ),
+        )
     conn.execute(sa.text(
         "CREATE INDEX IF NOT EXISTS ix_ratchet_sessions_local_user_id"
         " ON ratchet_sessions (local_user_id)"
@@ -103,24 +105,24 @@ def upgrade() -> None:
     # -------------------------------------------------------------------------
     # signed_prekeys
     # -------------------------------------------------------------------------
-    op.create_table(
-        "signed_prekeys",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("user_id", sa.UUID(), nullable=False),
-        sa.Column("key_id", sa.Integer(), nullable=False),
-        sa.Column("public_key", sa.String(512), nullable=False),
-        sa.Column("signature", sa.String(512), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        checkfirst=True,
-    )
+    if "signed_prekeys" not in existing_tables:
+        op.create_table(
+            "signed_prekeys",
+            sa.Column("id", sa.UUID(), nullable=False),
+            sa.Column("user_id", sa.UUID(), nullable=False),
+            sa.Column("key_id", sa.Integer(), nullable=False),
+            sa.Column("public_key", sa.String(512), nullable=False),
+            sa.Column("signature", sa.String(512), nullable=False),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+            sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("id"),
+        )
     conn.execute(sa.text(
         "CREATE INDEX IF NOT EXISTS ix_signed_prekeys_user_id_key_id"
         " ON signed_prekeys (user_id, key_id)"
@@ -129,23 +131,23 @@ def upgrade() -> None:
     # -------------------------------------------------------------------------
     # one_time_prekeys
     # -------------------------------------------------------------------------
-    op.create_table(
-        "one_time_prekeys",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("user_id", sa.UUID(), nullable=False),
-        sa.Column("key_id", sa.Integer(), nullable=False),
-        sa.Column("public_key", sa.String(512), nullable=False),
-        sa.Column("used", sa.Boolean(), nullable=False, server_default="false"),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        checkfirst=True,
-    )
+    if "one_time_prekeys" not in existing_tables:
+        op.create_table(
+            "one_time_prekeys",
+            sa.Column("id", sa.UUID(), nullable=False),
+            sa.Column("user_id", sa.UUID(), nullable=False),
+            sa.Column("key_id", sa.Integer(), nullable=False),
+            sa.Column("public_key", sa.String(512), nullable=False),
+            sa.Column("used", sa.Boolean(), nullable=False, server_default="false"),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("id"),
+        )
     conn.execute(sa.text(
         "CREATE INDEX IF NOT EXISTS ix_one_time_prekeys_user_id_used"
         " ON one_time_prekeys (user_id, used)"
@@ -154,27 +156,27 @@ def upgrade() -> None:
     # -------------------------------------------------------------------------
     # skipped_message_keys
     # -------------------------------------------------------------------------
-    op.create_table(
-        "skipped_message_keys",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("session_id", sa.UUID(), nullable=False),
-        sa.Column("ratchet_public_key", sa.String(512), nullable=False),
-        sa.Column("message_index", sa.Integer(), nullable=False),
-        sa.Column("message_key", sa.String(512), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(["session_id"], ["ratchet_sessions.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "session_id", "ratchet_public_key", "message_index",
-            name="uq_skipped_message_keys_session_ratchet_index",
-        ),
-        checkfirst=True,
-    )
+    if "skipped_message_keys" not in existing_tables:
+        op.create_table(
+            "skipped_message_keys",
+            sa.Column("id", sa.UUID(), nullable=False),
+            sa.Column("session_id", sa.UUID(), nullable=False),
+            sa.Column("ratchet_public_key", sa.String(512), nullable=False),
+            sa.Column("message_index", sa.Integer(), nullable=False),
+            sa.Column("message_key", sa.String(512), nullable=False),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.ForeignKeyConstraint(["session_id"], ["ratchet_sessions.id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint(
+                "session_id", "ratchet_public_key", "message_index",
+                name="uq_skipped_message_keys_session_ratchet_index",
+            ),
+        )
     conn.execute(sa.text(
         "CREATE INDEX IF NOT EXISTS ix_skipped_message_keys_session_id"
         " ON skipped_message_keys (session_id)"
