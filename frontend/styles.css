@@ -886,3 +886,243 @@ input.invalid {
 #chat-header-row { display: flex; align-items: center; justify-content: space-between; }
 #chat-fp { font-size: 0.68rem; font-family: monospace; }
 
+/* ============================================================
+   MESSAGE BUBBLE THREE-DOT MENU
+   ============================================================ */
+
+.message-bubble {
+  position: relative;
+}
+
+.bubble-menu-wrapper {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 10;
+}
+
+.bubble-menu-trigger {
+  opacity: 0;
+  transition: opacity 0.15s;
+  background: rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+  color: rgba(0, 0, 0, 0.55);
+  font-size: 11px;
+  padding: 1px 6px;
+  cursor: pointer;
+  line-height: 1.6;
+  letter-spacing: 1px;
+}
+
+.message-bubble:hover .bubble-menu-trigger,
+.message-bubble:focus-within .bubble-menu-trigger,
+.bubble-menu-wrapper:has(.bubble-menu-dropdown.open) .bubble-menu-trigger {
+  opacity: 1;
+}
+
+.bubble-menu-trigger:hover {
+  background: rgba(0, 0, 0, 0.2);
+  color: rgba(0, 0, 0, 0.8);
+}
+
+.bubble-menu-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: #1e2235;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  min-width: 130px;
+  overflow: hidden;
+  z-index: 100;
+}
+
+.bubble-menu-dropdown.open {
+  display: block;
+}
+
+.bubble-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 14px;
+  background: none;
+  border: none;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+
+.bubble-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.bubble-menu-item-danger {
+  color: #f87171;
+}
+
+.bubble-menu-item-danger:hover {
+  background: rgba(180, 30, 30, 0.18);
+  color: #fca5a5;
+}
+
+.bubble-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* ============================================================
+   MODALS — confirm dialog + forward recipient picker
+   ============================================================ */
+
+.msg-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.msg-modal-box {
+  background: #160f24;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  padding: 28px 32px 24px;
+  max-width: 420px;
+  width: 90%;
+  font-family: var(--font-serif);
+  color: #e2e8f0;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+.msg-modal-title {
+  font-size: 18px;
+  font-weight: normal;
+  color: #fff;
+  margin-bottom: 16px;
+}
+
+.msg-modal-text {
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.82);
+  line-height: 1.55;
+  margin-bottom: 8px;
+}
+
+.msg-modal-warning {
+  font-size: 13px;
+  color: rgba(250, 200, 80, 0.95);
+  background: rgba(250, 200, 80, 0.08);
+  border: 1px solid rgba(250, 200, 80, 0.2);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-top: 10px;
+  margin-bottom: 4px;
+  line-height: 1.5;
+}
+
+.msg-modal-btns {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 22px;
+}
+
+.msg-modal-btn-cancel {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50px;
+  color: rgba(255, 255, 255, 0.55);
+  font-family: var(--font-serif);
+  font-size: 14px;
+  padding: 8px 20px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.msg-modal-btn-cancel:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.msg-modal-btn-confirm {
+  background: rgba(220, 215, 230, 0.92);
+  border: none;
+  border-radius: 50px;
+  color: #111;
+  font-family: var(--font-serif);
+  font-size: 14px;
+  padding: 8px 20px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.msg-modal-btn-confirm:hover {
+  background: #fff;
+}
+
+.msg-modal-btn-confirm.danger {
+  background: rgba(200, 40, 40, 0.85);
+  color: #fff;
+}
+
+.msg-modal-btn-confirm.danger:hover {
+  background: rgba(200, 40, 40, 1);
+}
+
+/* Forward modal input */
+.fwd-modal-status {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+  min-height: 1.4em;
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+
+.fwd-modal-status.error {
+  color: #ef4444;
+}
+
+.fwd-recipient-input {
+  width: 100%;
+  background: rgba(180, 170, 195, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50px;
+  color: #fff;
+  padding: 10px 18px;
+  font-family: var(--font-serif);
+  font-size: 15px;
+  outline: none;
+  transition: box-shadow 0.2s;
+}
+
+.fwd-recipient-input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.fwd-recipient-input:focus {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
+}
+
+/* Revoked message state */
+.message-bubble.revoked .bubble-text {
+  color: rgba(0, 0, 0, 0.4);
+  font-style: italic;
+}
+
+.message-bubble.revoked .bubble-meta::before {
+  content: "access revoked · ";
+  color: rgba(0, 0, 0, 0.35);
+  font-size: 10px;
+}
+
