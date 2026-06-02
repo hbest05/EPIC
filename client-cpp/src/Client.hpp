@@ -51,6 +51,9 @@ public:
     /** POST /auth/login. On success: cookies are saved, CSRF token captured. */
     QString login(const QString& username, const QString& password);
 
+    /** POST /auth/change-password. @returns empty string on success, error on failure. */
+    QString changePassword(const QString& currentPassword, const QString& newPassword);
+
     /** POST /auth/logout — best-effort; always clears local session state. */
     void logout();
 

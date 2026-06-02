@@ -45,6 +45,7 @@ public:
 private slots:
     void onSendClicked();
     void onAddContactClicked();
+    void onChangePasswordClicked();
     void onThreadContextMenu(const QPoint& pos);
     void onRevokeAccess(int row);
     void onContactSelected(QListWidgetItem* item);
@@ -121,6 +122,7 @@ private:
     QLineEdit*   m_compose;
     QPushButton* m_sendButton;
     QPushButton* m_addContactButton;
+    QPushButton* m_changePasswordButton;
     QPushButton* m_loadOlderButton;
     QLabel*      m_topBar;
 
