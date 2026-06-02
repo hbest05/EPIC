@@ -944,6 +944,8 @@ function formatTimestamp(ms) {
   return `${dateStr} · ${timeStr}`;
 }
 
+const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function _appendBubble(list, senderUsername, plaintext, meta = {}) {
   const isMine = senderUsername === currentUser?.username;
   const bubble = document.createElement("div");
@@ -968,66 +970,61 @@ function _appendBubble(list, senderUsername, plaintext, meta = {}) {
   bubble.appendChild(textEl);
   bubble.appendChild(metaEl);
 
-  // Action buttons — only rendered when we have a stable server ID.
+  // Three-dot menu — only rendered when we have a stable server ID.
   // Mirrors C++ MainWindow context menu: forward + download available on all
   // messages; delete + revoke only on sent messages.
   // Revoke is additionally gated to forwarded messages (↪ prefix), matching
   // the C++ client check: isForwarded = plaintext.startsWith(QChar(0x21AA)).
-  if (meta.id) {
-    const actionsEl = document.createElement("div");
-    actionsEl.className = "bubble-actions";
+  {
+    const hasValidId = meta.id && _UUID_RE.test(meta.id);
+    const menuWrapper = document.createElement("div");
+    menuWrapper.className = "bubble-menu-wrapper";
 
-    // Forward — all messages (mirroring C++ "Forward message…" context action)
-    const fwdBtn = document.createElement("button");
-    fwdBtn.className = "action-btn";
-    fwdBtn.title     = "Forward message";
-    fwdBtn.textContent = "↪ fwd";
-    fwdBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      forwardMessage(senderUsername, plaintext);
-    });
-    actionsEl.appendChild(fwdBtn);
+    const trigger = document.createElement("button");
+    trigger.className   = "bubble-menu-trigger";
+    trigger.title       = "Message actions";
+    trigger.textContent = "•••";
 
-    // Download — all messages (reads from local plaintext cache, no server call)
-    const dlBtn = document.createElement("button");
-    dlBtn.className  = "action-btn";
-    dlBtn.title      = "Download message";
-    dlBtn.textContent = "↓ save";
-    dlBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      downloadMessage(senderUsername, plaintext, meta.id, tsMs);
-    });
-    actionsEl.appendChild(dlBtn);
+    const dropdown = document.createElement("div");
+    dropdown.className = "bubble-menu-dropdown";
 
-    if (isMine) {
-      // Revoke — only on sent messages that were forwarded (start with ↪ U+21AA),
-      // matching the C++ isForwarded check. Revocation hides the message from
-      // the recipient but does NOT destroy already-decrypted copies.
+    // Forward and save work from local cache — no server UUID needed.
+    const menuItems = [
+      { label: "↪ Forward", danger: false, action: () => forwardMessage(senderUsername, plaintext) },
+      { label: "↓ Save",    danger: false, action: () => downloadMessage(senderUsername, plaintext, meta.id, tsMs) },
+    ];
+
+    // Delete and revoke require a valid server UUID.
+    if (isMine && hasValidId) {
       if (plaintext.startsWith("↪")) {
-        const revokeBtn = document.createElement("button");
-        revokeBtn.className  = "action-btn action-btn-danger";
-        revokeBtn.title      = "Revoke access";
-        revokeBtn.textContent = "⊗ revoke";
-        revokeBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          revokeMessage(meta.id, bubble);
-        });
-        actionsEl.appendChild(revokeBtn);
+        menuItems.push({ label: "⊗ Revoke", danger: true, action: () => revokeMessage(meta.id, bubble) });
       }
-
-      // Delete — all sent messages
-      const delBtn = document.createElement("button");
-      delBtn.className  = "action-btn action-btn-danger";
-      delBtn.title      = "Delete message";
-      delBtn.textContent = "✕ del";
-      delBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        deleteMessage(meta.id, meta.blockchain_confirmed ?? false, bubble);
-      });
-      actionsEl.appendChild(delBtn);
+      menuItems.push({ label: "✕ Delete", danger: true, action: () => deleteMessage(meta.id, meta.blockchain_confirmed ?? false, bubble) });
     }
 
-    bubble.appendChild(actionsEl);
+    for (const item of menuItems) {
+      const btn = document.createElement("button");
+      btn.className   = "bubble-menu-item" + (item.danger ? " bubble-menu-item-danger" : "");
+      btn.textContent = item.label;
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        dropdown.classList.remove("open");
+        item.action();
+      });
+      dropdown.appendChild(btn);
+    }
+
+    trigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      document.querySelectorAll(".bubble-menu-dropdown.open").forEach(d => {
+        if (d !== dropdown) d.classList.remove("open");
+      });
+      dropdown.classList.toggle("open");
+    });
+
+    menuWrapper.appendChild(trigger);
+    menuWrapper.appendChild(dropdown);
+    bubble.appendChild(menuWrapper);
   }
 
   list.appendChild(bubble);
@@ -1245,7 +1242,7 @@ async function revokeMessage(msgId, bubbleEl) {
     if (bubbleEl) {
       bubbleEl.classList.add("revoked");
       // Disable further revoke/delete buttons on this bubble.
-      bubbleEl.querySelectorAll(".action-btn-danger").forEach(btn => {
+      bubbleEl.querySelectorAll(".bubble-menu-item-danger").forEach(btn => {
         btn.disabled = true;
         btn.style.opacity = "0.4";
       });
@@ -1350,6 +1347,10 @@ async function forwardMessage(origSenderUsername, plaintext) {
 // ---------------------------------------------------------------------------
 
 function attachEventListeners() {
+  document.addEventListener("click", () => {
+    document.querySelectorAll(".bubble-menu-dropdown.open").forEach(d => d.classList.remove("open"));
+  });
+
   document.getElementById("btn-login")?.addEventListener("click", login);
   document.getElementById("btn-logout")?.addEventListener("click", logout);
   document.getElementById("btn-send")?.addEventListener("click", sendMessage);

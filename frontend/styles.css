@@ -887,47 +887,94 @@ input.invalid {
 #chat-fp { font-size: 0.68rem; font-family: monospace; }
 
 /* ============================================================
-   MESSAGE BUBBLE ACTIONS — appear on hover
+   MESSAGE BUBBLE THREE-DOT MENU
    ============================================================ */
 
-.bubble-actions {
-  display: flex;
-  gap: 4px;
-  margin-top: 6px;
+.message-bubble {
+  position: relative;
+}
+
+.bubble-menu-wrapper {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 10;
+}
+
+.bubble-menu-trigger {
   opacity: 0;
   transition: opacity 0.15s;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-}
-
-.message-bubble:hover .bubble-actions,
-.message-bubble:focus-within .bubble-actions {
-  opacity: 1;
-}
-
-.action-btn {
   background: rgba(0, 0, 0, 0.12);
   border: 1px solid rgba(0, 0, 0, 0.18);
   border-radius: 4px;
   color: rgba(0, 0, 0, 0.55);
   font-size: 11px;
-  padding: 2px 7px;
+  padding: 1px 6px;
   cursor: pointer;
-  font-family: var(--font-serif);
   line-height: 1.6;
-  transition: background 0.15s, color 0.15s;
-  white-space: nowrap;
+  letter-spacing: 1px;
 }
 
-.action-btn:hover {
+.message-bubble:hover .bubble-menu-trigger,
+.message-bubble:focus-within .bubble-menu-trigger,
+.bubble-menu-wrapper:has(.bubble-menu-dropdown.open) .bubble-menu-trigger {
+  opacity: 1;
+}
+
+.bubble-menu-trigger:hover {
   background: rgba(0, 0, 0, 0.2);
   color: rgba(0, 0, 0, 0.8);
 }
 
-.action-btn-danger:hover {
+.bubble-menu-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: #1e2235;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  min-width: 130px;
+  overflow: hidden;
+  z-index: 100;
+}
+
+.bubble-menu-dropdown.open {
+  display: block;
+}
+
+.bubble-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 14px;
+  background: none;
+  border: none;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+
+.bubble-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.bubble-menu-item-danger {
+  color: #f87171;
+}
+
+.bubble-menu-item-danger:hover {
   background: rgba(180, 30, 30, 0.18);
-  border-color: rgba(180, 30, 30, 0.3);
-  color: #9b1c1c;
+  color: #fca5a5;
+}
+
+.bubble-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
 }
 
 /* ============================================================
