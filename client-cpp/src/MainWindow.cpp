@@ -18,6 +18,7 @@
 #include "Client.hpp"
 #include "CryptoDaemonClient.hpp"
 #include "MessageItemDelegate.hpp"
+#include "TofuStore.hpp"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QDebug>
@@ -406,6 +407,18 @@ bool MainWindow::startSessionWith(const QString& username, QString* err)
 
     PeerKeyBundle peer;
     peer.ikPub   = b64dec(bundle.value(QStringLiteral("ik_x25519")));
+
+    const TofuStore::PinResult pinResult =
+        m_tofuStore.checkAndPin(username, peer.ikPub);
+    if (pinResult == TofuStore::PinResult::Mismatch) {
+        QMessageBox::critical(this, tr("Security Warning"),
+            tr("The identity key for %1 has changed. "
+               "This may indicate a man-in-the-middle attack. "
+               "Message blocked.").arg(username));
+        if (err) *err = tr("TOFU key mismatch — message blocked");
+        return false;
+    }
+
     peer.signPub = b64dec(bundle.value(QStringLiteral("ik_ed25519")));
     const QJsonObject spk = bundle.value(QStringLiteral("spk")).toObject();
     peer.spkPub = b64dec(spk.value(QStringLiteral("public_key")));
@@ -528,6 +541,17 @@ bool MainWindow::sendTextToContact(const QString& contact, const QString& text)
             }
             PeerKeyBundle peer;
             peer.ikPub   = b64dec(bundle.value(QStringLiteral("ik_x25519")));
+
+            const TofuStore::PinResult pinResult =
+                m_tofuStore.checkAndPin(contact, peer.ikPub);
+            if (pinResult == TofuStore::PinResult::Mismatch) {
+                QMessageBox::critical(this, tr("Security Warning"),
+                    tr("The identity key for %1 has changed. "
+                       "This may indicate a man-in-the-middle attack. "
+                       "Message blocked.").arg(contact));
+                return false;
+            }
+
             peer.signPub = b64dec(bundle.value(QStringLiteral("ik_ed25519")));
             const QJsonObject spk = bundle.value(QStringLiteral("spk")).toObject();
             peer.spkPub = b64dec(spk.value(QStringLiteral("public_key")));

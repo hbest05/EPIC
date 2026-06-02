@@ -40,6 +40,7 @@ set(SOURCES
     src/Message.cpp
     src/User.cpp
     src/MessageStore.cpp
+    src/TofuStore.cpp
     src/MessageItemDelegate.cpp
     src/CryptoDaemonClient.cpp
     src/NetworkUtils.cpp

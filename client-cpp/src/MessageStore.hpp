@@ -57,6 +57,7 @@ public:
     bool isIdSeen(const std::string& id) const;
     void removeMessageById(const std::string& msgId);      // uses std::find_if + erase
     std::vector<Message> messagesFor(const std::string& contactUsername) const; // uses std::copy_if
+    std::vector<Message> receivedMessagesFor(const std::string& contactUsername) const; // uses std::copy_if
     int countMessagesFor(const std::string& contactUsername) const;             // uses std::count_if
 
     // Persistence cursor

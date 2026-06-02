@@ -100,7 +100,18 @@ std::vector<Message> MessageStore::messagesFor(const std::string& contactUsernam
     if (!conv) return result;
     std::copy_if(conv->messages.cbegin(), conv->messages.cend(),
                  std::back_inserter(result),
-                 [](const Message&) { return true; });
+                 [](const Message& m) { return m.direction() == Message::Direction::Sent; });
+    return result;
+}
+
+std::vector<Message> MessageStore::receivedMessagesFor(const std::string& contactUsername) const
+{
+    std::vector<Message> result;
+    const Conversation* conv = conversationPtr(contactUsername);
+    if (!conv) return result;
+    std::copy_if(conv->messages.cbegin(), conv->messages.cend(),
+                 std::back_inserter(result),
+                 [](const Message& m) { return m.direction() == Message::Direction::Received; });
     return result;
 }
 
@@ -109,7 +120,7 @@ int MessageStore::countMessagesFor(const std::string& contactUsername) const
     const Conversation* conv = conversationPtr(contactUsername);
     if (!conv) return 0;
     return static_cast<int>(std::count_if(conv->messages.cbegin(), conv->messages.cend(),
-        [](const Message&) { return true; }));
+        [](const Message& m) { return m.direction() == Message::Direction::Received; }));
 }
 
 void MessageStore::clear()

@@ -18,6 +18,7 @@
 
 #include "Message.hpp"
 #include "MessageStore.hpp"
+#include "TofuStore.hpp"
 
 class Client;
 class QJsonObject;
@@ -149,6 +150,10 @@ private:
      *  flag, render window, decrypted history), the seen-id set, and the
      *  incremental-poll cursor. */
     MessageStore m_store;
+
+    /** Trust-On-First-Use identity-key pins, checked before every X3DH session
+     *  setup to catch a peer's identity key changing under us (MITM signal). */
+    TofuStore m_tofuStore;
 
     static constexpr int kPageSize = 30;
 
