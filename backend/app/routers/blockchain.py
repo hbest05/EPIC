@@ -20,13 +20,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import datetime, timezone
+
 from app.database import AsyncSessionLocal, get_db
 from app.models.message import Message
-from app.schemas.message import BlockchainVerifyResponse
+from app.models.revocation import ConversationRevocation
+from app.schemas.message import BlockchainVerifyResponse, RevokeAccessResponse
 from app.services.auth_service import get_current_user
 from app.services.rate_limit import limiter
 from app.services.blockchain_service import (
     blockchain_configured,
+    record_event_triggered_digest,
     record_final_digest,
     verify_on_chain,
 )
@@ -42,6 +46,12 @@ router               = APIRouter()
 verify_router        = APIRouter()
 conversations_router = APIRouter()
 public_router        = APIRouter()   # no auth — used by the standalone verify page
+
+
+@router.get("/status")
+async def blockchain_status():
+    """Returns whether blockchain integration is configured on this server."""
+    return {"configured": blockchain_configured()}
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +103,7 @@ async def _do_verify(
     result = await db.execute(
         select(Message)
         .where(
-            Message.blockchain_record_index.isnot(None),
+            Message.blockchain_tx_hash.isnot(None),
             (
                 (Message.sender_id == uid_a) & (Message.recipient_id == uid_b)
             ) | (
@@ -127,8 +137,9 @@ async def _do_verify(
     try:
         result_data = await verify_on_chain(
             conversation_id=conversation_id,
-            record_index=msg.blockchain_record_index,
             conversation_text=conversation_text,
+            record_index=msg.blockchain_record_index,
+            batch_index=msg.blockchain_batch_index,
         )
     except TimeoutError as exc:
         raise HTTPException(
@@ -141,10 +152,11 @@ async def _do_verify(
             detail=f"Blockchain verification failed: {exc}",
         )
 
-    tx_hash = msg.blockchain_tx_hash or ""
+    tx_hash   = msg.blockchain_tx_hash or ""
+    idx       = msg.blockchain_record_index if msg.blockchain_record_index is not None else msg.blockchain_batch_index
     return BlockchainVerifyResponse(
         conversation_id=conversation_id,
-        record_index=msg.blockchain_record_index,
+        record_index=idx if idx is not None else 0,
         verified=result_data["verified"],
         on_chain_digest=result_data["onChainDigest"],
         local_digest=result_data["localDigest"],
@@ -269,3 +281,86 @@ async def close_conversation(
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# POST /api/conversations/{conversation_id}/revoke/{user_id}  (Tier 2)
+# ---------------------------------------------------------------------------
+
+@conversations_router.post("/{conversation_id}/revoke/{user_id}", response_model=RevokeAccessResponse)
+async def revoke_access(
+    conversation_id: str,
+    user_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+):
+    """
+    Tier 2 — revoke a participant's access to a conversation.
+
+    Persists a ConversationRevocation row regardless of blockchain availability,
+    then records the revocation immediately on-chain via recordDigest() so the
+    timestamp of the revocation act is provably anchored.
+
+    Blocks: self-revocation; non-participant caller; non-participant target.
+    """
+    # Validate conversation_id and participant membership.
+    parts = conversation_id.split("_", 1)
+    if len(parts) != 2:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="conversation_id must be in the format {uuid1}_{uuid2}",
+        )
+    try:
+        uid_a = uuid.UUID(parts[0])
+        uid_b = uuid.UUID(parts[1])
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="conversation_id must be in the format {uuid1}_{uuid2}",
+        )
+
+    if current_user.id not in (uid_a, uid_b):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="You are not a participant in this conversation.")
+
+    if user_id not in (uid_a, uid_b):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Target user is not a participant in this conversation.")
+
+    if user_id == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="You cannot revoke your own access.")
+
+    revoked_at = datetime.now(timezone.utc)
+
+    # Persist revocation regardless of blockchain availability — dedicated
+    # session with explicit commit so the row is visible to the back-fill UPDATE.
+    async with AsyncSessionLocal() as session:
+        revocation = ConversationRevocation(
+            conversation_id=conversation_id,
+            revoked_user_id=user_id,
+            revoked_by_id=current_user.id,
+            revoked_at=revoked_at,
+        )
+        session.add(revocation)
+        await session.commit()
+        await session.refresh(revocation)
+        revocation_id = str(revocation.id)
+
+    # Tier 2 — record revocation event on-chain immediately.
+    blockchain_result = await record_event_triggered_digest(
+        conversation_id=conversation_id,
+        message_id=revocation_id,
+        conversation_text=f"revoke:{user_id}:{revoked_at.isoformat()}",
+    )
+
+    tx_hash   = blockchain_result.get("tx_hash") if blockchain_result else None
+    etherscan = f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+
+    return RevokeAccessResponse(
+        revoked_user_id=str(user_id),
+        conversation_id=conversation_id,
+        tx_hash=tx_hash,
+        etherscan_url=etherscan,
+        revoked_at=revoked_at,
+    )

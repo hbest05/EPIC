@@ -72,6 +72,25 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # Fanout worker — reads from Redis, writes batch digests to Ethereum
+  # ---------------------------------------------------------------------------
+  fanout-worker:
+    image: epic-fanout-worker
+    environment:
+      ETH_RPC:          "${RPC_URL:-https://rpc2.sepolia.org}"
+      ETH_PRIVATE_KEY:  "${PRIVATE_KEY:-}"
+      CONTRACT_ADDRESS: "${CONTRACT_ADDRESS:-}"
+      DB_URL:           "postgresql://securemsg:securemsg@db:5432/securemsg"
+      REDIS_ADDR:       "redis:6379"
+      REDIS_PASSWORD:   "${REDIS_PASSWORD}"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # Redis — blockchain write queue
   # ---------------------------------------------------------------------------
   redis:

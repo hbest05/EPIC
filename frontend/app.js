@@ -65,6 +65,10 @@ const seenMessageIds = new Set(); // server message IDs already processed this s
 
 let activeRecipient = null;
 let inboxPoller     = null;
+let confirmPoller   = null;
+
+// Message IDs rendered with ⏳ that haven't been confirmed on-chain yet.
+const pendingConfirmations = new Set();
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -484,12 +488,12 @@ async function persistMessage(sender, recipient, plaintext, msgId, timestamp, bl
     blockchain_confirmed: blockchainConfirmed,
   };
 
-  if (messageCache.has(convId)) {
-    const msgs = messageCache.get(convId);
-    if (!msgs.find(m => m.id === entry.id)) {
-      msgs.push(entry);
-      msgs.sort((a, b) => a.timestamp - b.timestamp);
-    }
+  // Always keep the in-memory cache live, even without a storageKey.
+  if (!messageCache.has(convId)) messageCache.set(convId, []);
+  const msgs = messageCache.get(convId);
+  if (!msgs.find(m => m.id === entry.id)) {
+    msgs.push(entry);
+    msgs.sort((a, b) => a.timestamp - b.timestamp);
   }
 
   if (!storageKey) return;
@@ -658,11 +662,15 @@ async function fetchInbox() {
 // ---------------------------------------------------------------------------
 
 async function verifyBlockchain(username) {
-  const bundle = contacts.get(username);
+  let bundle = contacts.get(username);
   if (!bundle?.user_id) {
-    const panel = document.getElementById("verify-result-panel");
-    if (panel) { panel.textContent = "Re-add this contact to enable verification."; panel.style.display = "block"; }
-    return;
+    try {
+      bundle = await fetchContactKeybundle(username);
+    } catch (err) {
+      const panel = document.getElementById("verify-result-panel");
+      if (panel) { panel.textContent = "Verify failed: " + err.message; panel.style.display = "block"; }
+      return;
+    }
   }
 
   const convId = serverConvId(currentUser.id, bundle.user_id);
@@ -803,12 +811,49 @@ async function _topUpOPKs() {
 // ---------------------------------------------------------------------------
 
 function startInboxPoller() {
-  inboxPoller = setInterval(fetchInbox, POLL_INTERVAL_MS);
+  inboxPoller   = setInterval(fetchInbox, POLL_INTERVAL_MS);
+  confirmPoller = setInterval(_checkPendingConfirmations, 15_000);
 }
 
 function stopInboxPoller() {
   clearInterval(inboxPoller);
-  inboxPoller = null;
+  clearInterval(confirmPoller);
+  inboxPoller   = null;
+  confirmPoller = null;
+}
+
+async function _checkPendingConfirmations() {
+  if (pendingConfirmations.size === 0) return;
+  for (const msgId of [...pendingConfirmations]) {
+    try {
+      const msg = await apiFetch(`/messages/${msgId}`);
+      if (!msg.blockchain_confirmed) continue;
+
+      pendingConfirmations.delete(msgId);
+
+      // Update the badge in every visible bubble with this message ID.
+      document.querySelectorAll(`[data-message-id="${CSS.escape(msgId)}"]`).forEach(bubble => {
+        const badge = bubble.querySelector(".badge-pending");
+        if (badge) {
+          badge.className = "badge-verified";
+          badge.title     = "Blockchain verified";
+          badge.textContent = "✓";
+        }
+      });
+
+      // Keep in-memory caches in sync so re-renders show ✓ too.
+      for (const entries of decryptedCache.values()) {
+        const e = entries.find(x => x.meta?.id === msgId);
+        if (e) e.meta.blockchain_confirmed = true;
+      }
+      for (const msgs of messageCache.values()) {
+        const m = msgs.find(x => x.id === msgId);
+        if (m) m.blockchain_confirmed = true;
+      }
+    } catch {
+      pendingConfirmations.delete(msgId);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -843,11 +888,54 @@ function showAuth() {
 function showApp() {
   document.getElementById("auth-section").style.display = "none";
   document.getElementById("app-section").style.display  = "flex";
-  // Populate sidebar username display (from Alphra design)
   const display = document.getElementById("my-username-display");
   if (display && currentUser) display.textContent = currentUser.username;
-  // Open WebSocket for real-time delivery
   connectWebSocket();
+  _applyBlockchainVisibility();
+  _restoreContactList();
+}
+
+// Re-populate the sidebar from the TOFU store — every pinned contact is
+// someone the user has explicitly added, so it's the right persistence source.
+async function _restoreContactList() {
+  if (!currentUser) return;
+  try {
+    const db     = await openTofuDb();
+    const prefix = `${currentUser.username}:`;
+    const tx     = db.transaction(TOFU_STORE_NAME);
+    const store  = tx.objectStore(TOFU_STORE_NAME);
+
+    const allKeys = await new Promise((resolve, reject) => {
+      const req = store.getAllKeys();
+      req.onsuccess = () => resolve(req.result ?? []);
+      req.onerror   = () => reject(req.error);
+    });
+
+    const mine = allKeys.filter(k => String(k).startsWith(prefix));
+
+    for (const key of mine) {
+      const contactUsername = String(key).slice(prefix.length);
+      const record = await new Promise((resolve, reject) => {
+        const req = db.transaction(TOFU_STORE_NAME).objectStore(TOFU_STORE_NAME).get(key);
+        req.onsuccess = () => resolve(req.result ?? {});
+        req.onerror   = () => reject(req.error);
+      });
+      addContactToSidebar(contactUsername, record.fingerprint ?? null, false);
+    }
+  } catch (err) {
+    console.warn("_restoreContactList:", err);
+  }
+}
+
+let _blockchainConfigured = false;
+
+async function _applyBlockchainVisibility() {
+  try {
+    const { configured } = await apiFetch("/blockchain/status");
+    _blockchainConfigured = configured;
+  } catch {
+    _blockchainConfigured = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -895,6 +983,10 @@ function _appendBubble(list, senderUsername, plaintext, meta = {}) {
     `<div class="bubble-meta">${escapeHtml(timeStr)}${badgeHtml}</div>`;
 
   list.appendChild(bubble);
+
+  if (meta.id && !meta.blockchain_confirmed && meta.timestamp) {
+    pendingConfirmations.add(meta.id);
+  }
 }
 
 function escapeHtml(str) {
@@ -1008,10 +1100,7 @@ function addContactToSidebar(username, fingerprintHex, isFirstContact) {
     if (chatFp) chatFp.textContent = fingerprintHex ? _formatFingerprint(fingerprintHex) : "";
 
     const verifyBtn = document.getElementById("btn-verify-chain");
-    if (verifyBtn) {
-      const bundle = contacts.get(username);
-      verifyBtn.style.display = bundle?.user_id ? "inline-flex" : "none";
-    }
+    if (verifyBtn) verifyBtn.style.display = _blockchainConfigured ? "inline-flex" : "none";
 
     // Load and render history from encrypted IndexedDB store.
     renderLimits.set(username, PAGE_SIZE);
@@ -1059,7 +1148,11 @@ async function apiFetch(path, options = {}) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `HTTP ${res.status}`);
+    const detail = err.detail;
+    const message = Array.isArray(detail)
+      ? detail.map(e => e.msg ?? String(e)).join(", ")
+      : (detail || `HTTP ${res.status}`);
+    throw new Error(message);
   }
 
   if (res.status === 204) return null;

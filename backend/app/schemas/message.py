@@ -74,6 +74,28 @@ class MessageResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Tier 2 — forward & revoke
+# ---------------------------------------------------------------------------
+
+class ForwardMessageRequest(BaseModel):
+    target_username: str = Field(..., description="Username of the recipient of the forwarded message")
+
+
+class ForwardMessageResponse(BaseModel):
+    id: str
+    tx_hash: Optional[str] = None
+    etherscan_url: Optional[str] = None
+
+
+class RevokeAccessResponse(BaseModel):
+    revoked_user_id: str
+    conversation_id: str
+    tx_hash: Optional[str] = None
+    etherscan_url: Optional[str] = None
+    revoked_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Blockchain verification
 # ---------------------------------------------------------------------------
 

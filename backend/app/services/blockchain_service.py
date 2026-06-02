@@ -114,7 +114,7 @@ def _ctx() -> tuple:
                 "is accessible (see _ABI_CANDIDATES in blockchain_service.py)."
             )
 
-        _w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+        _w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"timeout": 60}))
         # from_key() is synchronous — derives the account address from the key.
         # PRIVATE_KEY is never logged; the account object only exposes the address.
         _account  = _w3.eth.account.from_key(private_key)
@@ -398,7 +398,10 @@ async def push_to_batch(
         "content_hash": content_hash,
     }, sort_keys=True, separators=(",", ":"))
     length = await redis.rpush(_batch_key(conversation_id), entry)
-    return int(length)
+    length = int(length)
+    logger.warning("BATCH push conv=%s msg=%s list_length=%d/%d",
+                   conversation_id[:16], message_id[:8], length, BATCH_SIZE)
+    return length
 
 
 async def flush_batch(conversation_id: str) -> Optional[dict]:
@@ -421,9 +424,11 @@ async def flush_batch(conversation_id: str) -> Optional[dict]:
 
     entries = [json.loads(item) for item in raw_items]
     payload = _build_batch_payload(entries)
+    logger.warning("BATCH popped %d entries from Redis, building tx", len(entries))
 
     w3, contract, account = _ctx()
     digest: bytes = w3.keccak(text=payload)
+    logger.warning("BATCH digest=%s account=%s — fetching nonce/gas", digest.hex()[:16], account.address)
 
     nonce, gas_price, chain_id = await asyncio.gather(
         w3.eth.get_transaction_count(account.address),
@@ -493,14 +498,28 @@ async def flush_batch(conversation_id: str) -> Optional[dict]:
 async def flush_batch_if_ready(conversation_id: str, current_length: int) -> None:
     """
     Flush the batch only when it has reached BATCH_SIZE.
-    Scheduled as a BackgroundTask — never raises.
+    Runs flush_batch as an independent event-loop task so it is not cancelled
+    when the HTTP request context closes before the RPC calls complete.
     """
     if current_length < BATCH_SIZE:
+        logger.warning("BATCH not ready conv=%s length=%d/%d",
+                       conversation_id[:16], current_length, BATCH_SIZE)
         return
+    logger.warning("BATCH threshold reached conv=%s — scheduling flush", conversation_id[:16])
+    asyncio.ensure_future(_flush_batch_guarded(conversation_id))
+
+
+async def _flush_batch_guarded(conversation_id: str) -> None:
+    logger.warning("BATCH flush starting conv=%s", conversation_id[:16])
     try:
-        await flush_batch(conversation_id)
+        result = await flush_batch(conversation_id)
+        if result:
+            logger.warning("BATCH flush SUCCESS conv=%s tx=%s block=%s",
+                           conversation_id[:16], result.get("tx_hash","?")[:16], result.get("block_number","?"))
+        else:
+            logger.warning("BATCH flush returned None conv=%s", conversation_id[:16])
     except Exception as exc:
-        logger.error("flush_batch failed for conv=%s: %s", conversation_id, exc)
+        logger.error("BATCH flush FAILED conv=%s: %s", conversation_id[:16], exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -617,17 +636,75 @@ async def record_final_digest(conversation_id: str) -> dict:
     }
 
 
+async def verify_batch_digest(
+    conversation_id: str,
+    conversation_text: str,  # unused — kept for API compat; payload rebuilt from DB
+    batch_index: int,
+) -> dict:
+    """
+    Verify a batch record via getBatch(batch_index).
+    Reconstructs the original batch payload from the DB so the local digest
+    matches exactly what was submitted on-chain.
+    """
+    import base64 as _b64
+    from app.database import AsyncSessionLocal
+    from app.models.message import Message as _Msg
+
+    # Fetch all messages that belong to this batch.
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(_Msg)
+            .where(_Msg.blockchain_batch_index == batch_index)
+            .order_by(_Msg.created_at)
+        )).scalars().all()
+
+    entries = [
+        {
+            "message_id":   str(row.id),
+            "sender_id":    str(row.sender_id),
+            "timestamp":    row.created_at.isoformat(),
+            "content_hash": compute_content_hash(_b64.b64encode(row.ciphertext).decode()),
+        }
+        for row in rows
+    ]
+
+    w3, contract, _ = _ctx()
+    local_payload = _build_batch_payload(entries)
+    local_digest: bytes = w3.keccak(text=local_payload)
+
+    digest, timestamp, _, on_chain_conv_id, _ = (
+        await contract.functions.getBatch(batch_index).call()
+    )
+
+    verified = local_digest == digest
+    if not verified:
+        logger.warning(
+            "VERIFY mismatch batch_index=%s entries=%d local_payload_prefix=%.80s",
+            batch_index, len(entries), local_payload
+        )
+
+    return {
+        "verified":        verified,
+        "onChainDigest":   "0x" + digest.hex(),
+        "localDigest":     "0x" + local_digest.hex(),
+        "timestamp":       timestamp,
+        "conversationId":  on_chain_conv_id,
+    }
+
+
 async def verify_on_chain(
     conversation_id: str,
-    record_index: int,
     conversation_text: str,
+    record_index: Optional[int] = None,
+    batch_index: Optional[int] = None,
 ) -> dict:
     """
     Verify a conversation segment against its on-chain digest.
 
-    Thin wrapper around verify_digest() that preserves the interface expected
-    by blockchain.py router.  Returns camelCase keys.
-
+    Uses getBatch() for batch-confirmed messages (batch_index set) or
+    getRecord() for single-digest messages (record_index set).
     Raises RuntimeError / TimeoutError — caller maps these to HTTP errors.
     """
+    if batch_index is not None:
+        return await verify_batch_digest(conversation_id, conversation_text, batch_index)
     return await verify_digest(conversation_id, conversation_text, record_index)

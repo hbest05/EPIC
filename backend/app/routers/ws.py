@@ -24,8 +24,9 @@ import os
 import random
 import uuid
 
+import jwt as pyjwt
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
-from jose import JWTError, jwt
 from sqlalchemy import select
 
 from app.config import settings
@@ -49,11 +50,11 @@ async def _authenticate(websocket: WebSocket) -> User | None:
         return None
 
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        payload = pyjwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
         user_id = payload.get("sub")
         if not user_id:
             return None
-    except JWTError:
+    except pyjwt.PyJWTError:
         return None
 
     # User.id is a UUID(as_uuid=True) column — asyncpg needs a uuid.UUID, not
