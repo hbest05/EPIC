@@ -19,8 +19,8 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
-from app.models.message import Message
+from app.database import AsyncSessionLocal, get_db
+from app.models.message import Message, UserKey
 from app.models.user import User
 from app.schemas.message import (
     MessageResponse,
@@ -35,6 +35,7 @@ from app.services.blockchain_service import (
     flush_batch_if_ready,
     push_to_batch,
 )
+from app.services.redis_service import get_redis
 from app.services.ws_manager import manager
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,18 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _bucket_timestamp(dt: datetime, bucket_minutes: int = 15) -> datetime:
+    """Floor dt to the nearest bucket_minutes boundary (UTC).
+
+    Stored in the DB so an observer with read access sees only bucketed
+    timestamps, degrading timing-correlation attacks. The exact send time
+    is inside the AEAD ciphertext (server-opaque) and on Sepolia (blockchain).
+    """
+    bucket_seconds = bucket_minutes * 60
+    epoch = int(dt.timestamp())
+    return datetime.fromtimestamp((epoch // bucket_seconds) * bucket_seconds, tz=timezone.utc)
+
 
 def _conversation_id(user_a_id, user_b_id) -> str:
     """
@@ -170,6 +183,29 @@ async def send_message(
             detail="ciphertext and nonce must be valid base64",
         )
 
+    # Validate x3dh_header.ik_a against the sender's registered X25519 key.
+    # Without this check an authenticated user could supply a third party's
+    # public key, poisoning the recipient's TOFU store to pin the wrong identity.
+    if body.x3dh_header is not None:
+        key_row = await db.execute(
+            select(UserKey).where(
+                UserKey.user_id == current_user.id,
+                UserKey.key_type == "x25519",
+            )
+        )
+        registered_key = key_row.scalar_one_or_none()
+        if registered_key is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="No registered identity key found for this account",
+            )
+        expected_ik = base64.b64encode(registered_key.public_key).decode()
+        if body.x3dh_header.ik_a != expected_ik:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="x3dh_header.ik_a does not match your registered identity key",
+            )
+
     # Decide what to store in the (NOT NULL) hpke_enc_blob column.
     #   1. Double Ratchet first-message: serialise the X3DH initiator header.
     #   2. Double Ratchet follow-up:     empty bytes.
@@ -189,7 +225,9 @@ async def send_message(
     else:
         hpke_enc_blob_bytes = b""
 
-    # Persist message — get_db() commits on success
+    # Persist message — created_at is bucketed to 15-min intervals so the
+    # server's metadata log reveals only coarse timing to a DB-level attacker.
+    # Exact send time lives inside the AEAD ciphertext (server-opaque).
     msg = Message(
         sender_id=current_user.id,
         recipient_id=recipient.id,
@@ -199,6 +237,7 @@ async def send_message(
         ratchet_public_key=body.ratchet_pub,
         previous_chain_length=body.pn,
         message_index=body.n,
+        created_at=_bucket_timestamp(datetime.now(timezone.utc)),
     )
     db.add(msg)
     await db.flush()  # populate msg.id before the task captures it
@@ -241,6 +280,7 @@ async def send_message(
     )
 
     return SendMessageResponse(id=str(msg.id))
+
 
 
 # ---------------------------------------------------------------------------

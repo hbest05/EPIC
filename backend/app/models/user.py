@@ -31,6 +31,10 @@ class User(Base):
     identity_key = Column(String(512), nullable=True)        # base64 X25519 public key
     ed25519_public_key = Column(String(512), nullable=True)  # base64 Ed25519 signing key
 
+    # "web" or "cpp" — set at registration, enforced at login.
+    # NULL means legacy account with no restriction.
+    client_type = Column(String(16), nullable=True)
+
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     last_seen_at = Column(DateTime, nullable=True)

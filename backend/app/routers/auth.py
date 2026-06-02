@@ -19,10 +19,13 @@ from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
     OPKBundle,
+    OPKCountResponse,
     RegisterRequest,
     SPKBundle,
+    UploadOPKsRequest,
     UploadPrekeysRequest,
     UserPublicProfile,
+    _VALID_CLIENT_TYPES,
 )
 from app.services.auth_service import (
     create_access_token,
@@ -50,6 +53,12 @@ _COOKIE_MAX_AGE = settings.jwt_access_token_expire_minutes * 60
 @router.post("/register", response_model=UserPublicProfile, status_code=status.HTTP_201_CREATED)
 @limiter.limit("5/minute")
 async def register(request: Request, body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    if body.client_type not in _VALID_CLIENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"client_type must be one of: {', '.join(sorted(_VALID_CLIENT_TYPES))}",
+        )
+
     # Uniqueness checks
     taken = await db.execute(select(User).where(User.username == body.username))
     if taken.scalar_one_or_none():
@@ -68,12 +77,23 @@ async def register(request: Request, body: RegisterRequest, db: AsyncSession = D
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Public keys must be valid base64",
         )
+    if len(x25519_bytes) != 32:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="x25519_public_key must be 32 bytes",
+        )
+    if len(ed25519_bytes) != 32:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="ed25519_public_key must be 32 bytes",
+        )
 
     # Create user — password hashed with Argon2id (m=65536, t=3, p=4)
     user = User(
         username=body.username,
         email=body.email,
         password_hash=hash_password(body.password),
+        client_type=body.client_type,
     )
     db.add(user)
     await db.flush()  # get user.id before inserting UserKey rows
@@ -101,6 +121,12 @@ async def register(request: Request, body: RegisterRequest, db: AsyncSession = D
 async def login(request: Request, body: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
     ip = request.client.host
 
+    if body.client_type not in _VALID_CLIENT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"client_type must be one of: {', '.join(sorted(_VALID_CLIENT_TYPES))}",
+        )
+
     # Reject immediately if this IP has hit the failure threshold — no DB work needed
     if await get_auth_failure_count(ip) >= AUTH_MAX_FAILURES:
         raise HTTPException(
@@ -123,6 +149,12 @@ async def login(request: Request, body: LoginRequest, response: Response, db: As
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if not user.is_active:
+        await record_auth_failure(ip)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    # Enforce client_type — accounts are bound to the client that created them.
+    # Legacy accounts (client_type IS NULL) are allowed from any client.
+    if user.client_type is not None and user.client_type != body.client_type:
         await record_auth_failure(ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
@@ -210,7 +242,10 @@ async def change_password(
 
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(response: Response, current_user: User = Depends(get_current_user)):
+    # Require a valid session so only the authenticated user can invalidate their
+    # own cookies, and so any future server-side revocation store can be keyed
+    # to current_user.id rather than executing blindly for anonymous callers.
     response.delete_cookie("access_token")
     response.delete_cookie("csrf_token")
     return {"message": "Logged out"}
@@ -286,6 +321,44 @@ async def upload_prekeys(
     # get_db commits all inserts on success; returns 204 No Content
 
 
+@router.get("/prekeys/count", response_model=OPKCountResponse)
+async def get_opk_count(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the number of unused OPKs remaining for the current user."""
+    result = await db.execute(
+        select(OneTimePrekey)
+        .where(OneTimePrekey.user_id == current_user.id, OneTimePrekey.used.is_(False))
+    )
+    count = len(result.scalars().all())
+    return OPKCountResponse(opk_count=count)
+
+
+@router.post("/opks", status_code=status.HTTP_204_NO_CONTENT)
+async def upload_opks(
+    body: UploadOPKsRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a batch of fresh OPKs without rotating the SPK."""
+    try:
+        for opk in body.one_time_prekeys:
+            base64.b64decode(opk.public_key, validate=True)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="All public_key fields must be valid base64",
+        )
+
+    for opk in body.one_time_prekeys:
+        db.add(OneTimePrekey(
+            user_id=current_user.id,
+            key_id=opk.key_id,
+            public_key=opk.public_key,
+        ))
+
+
 @router.get("/user/{username}/keybundle", response_model=KeyBundleResponse)
 async def get_keybundle(
     username: str,
@@ -346,6 +419,7 @@ async def get_keybundle(
     return KeyBundleResponse(
         user_id=target.id,
         username=target.username,
+        user_id=str(target.id),
         ik_x25519=base64.b64encode(ik_x25519.public_key).decode(),
         ik_ed25519=base64.b64encode(ik_ed25519.public_key).decode(),
         ik_fingerprint=ik_x25519.key_fingerprint,

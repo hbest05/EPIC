@@ -22,7 +22,9 @@ from starlette.responses import JSONResponse
 
 _STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 
-# Pre-auth endpoints — csrf_token cookie does not exist yet at call time
+# Pre-auth endpoints only — csrf_token cookie does not exist yet at call time.
+# Every post-login endpoint (including /api/auth/prekeys) is deliberately NOT
+# exempt: the client already attaches X-CSRF-Token via apiFetch for all POSTs.
 _CSRF_EXEMPT_PATHS = frozenset({
     "/api/auth/login",
     "/api/auth/register",

@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import logging
 import uuid
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -36,7 +36,7 @@ class DaemonState:
     """In-memory state shared across all connections for the daemon lifetime."""
 
     def __init__(self):
-        self.identity: identity_mod.Identity | None = None
+        self.identity: Optional[identity_mod.Identity] = None
         # Most recent batch of generated prekeys (responder side).
         # {'spk_priv': X25519PrivateKey, 'spk_pub_bytes': bytes,
         #  'spk_sig': bytes, 'opks': {opk_pub_b64: X25519PrivateKey}}

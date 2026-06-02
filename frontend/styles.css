@@ -43,7 +43,30 @@ input {
   border-radius: 6px;
   background: #0f1117;
   color: #e2e8f0;
-  margin-bottom: 0.5rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.75rem;
+}
+
+input.invalid {
+  border-color: #ef4444;
+  outline-color: #ef4444;
+}
+
+.field-error {
+  font-size: 0.78rem;
+  color: #ef4444;
+  min-height: 1em;
+}
+
+.form-error {
+  display: block;
+  text-align: center;
+  margin-bottom: 0.25rem;
 }
 
 button {
@@ -90,6 +113,13 @@ button:hover {
   font-weight: 600;
 }
 
+#load-older-bar {
+  display: none;
+  justify-content: center;
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid #2d3148;
+}
+
 #message-list {
   flex: 1;
   overflow-y: auto;
@@ -134,3 +164,16 @@ button:hover {
   color: #34d399;
   margin-top: 4px;
 }
+
+.msg-ts       { font-size: 0.7rem; color: #6b7280; margin-left: 6px; }
+.contact-fp   { font-size: 0.68rem; color: #94a3b8; font-family: monospace; word-break: break-all; margin-top: 2px; }
+.fp-new       { color: #f59e0b; font-size: 0.68rem; }
+.fp-pinned    { color: #34d399; font-size: 0.68rem; }
+.btn-small    { width: auto; padding: 0.25rem 0.6rem; font-size: 0.78rem; }
+.btn-secondary { background: #374151; }
+.btn-secondary:hover { background: #4b5563; }
+
+#chat-header { display: flex; flex-direction: column; gap: 2px; padding: 0.5rem 1rem; border-bottom: 1px solid #2d3148; }
+#chat-header-row { display: flex; align-items: center; justify-content: space-between; }
+#chat-fp { font-size: 0.68rem; color: #94a3b8; font-family: monospace; }
+

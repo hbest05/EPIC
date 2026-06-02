@@ -33,7 +33,9 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 RATCHET_INFO = b"SecureMsg_Ratchet_v1"
 CHAIN_INFO = b"SecureMsg_MsgKey_v1"
 PAD_BLOCK = 256
-MAX_SKIPPED = 100
+# Signal Protocol spec — DoS protection, not just optimisation.
+# Messages arriving more than MAX_SKIP positions ahead are rejected.
+MAX_SKIP = 1000
 NONCE_LEN = 12
 
 
@@ -177,16 +179,25 @@ class Session:
 
     # ------------------------------------------------------------------ encrypt
 
-    def _make_aad(self, ratchet_pub: bytes, pn: int, n: int) -> bytes:
+    def _make_aad(self, ratchet_pub: bytes, pn: int, n: int, device_id: str = "") -> bytes:
+        """
+        AD = IK_A(32) || IK_B(32) || ratchet_pub(32) || PN(4 BE) || N(4 BE) || device_id(UTF-8)
+
+        Matches Signal Protocol spec (Lecture 08, slide 30).
+        IK_A || IK_B prevent the unknown key-share attack (slide 31).
+        ratchet_pub || PN || N prevent splice/reorder attacks (slide 32).
+        device_id binds the ciphertext to a specific recipient device.
+        """
         return (
             self.ik_a
             + self.ik_b
             + ratchet_pub
             + pn.to_bytes(4, "big")
             + n.to_bytes(4, "big")
+            + device_id.encode("utf-8")
         )
 
-    def encrypt(self, plaintext: str) -> dict:
+    def encrypt(self, plaintext: str, device_id: str = "") -> dict:
         if self.ck_send is None:
             raise RuntimeError("no sending chain; call dh_ratchet_step first")
         new_ck, mk = advance_chain(self.ck_send)
@@ -198,7 +209,7 @@ class Session:
 
             padded = pad_message(plaintext.encode("utf-8"))
             nonce = secrets.token_bytes(NONCE_LEN)
-            aad = self._make_aad(self.dhs_pub_bytes, self.pn, n)
+            aad = self._make_aad(self.dhs_pub_bytes, self.pn, n, device_id)
             ct = AESGCM(bytes(mk_buf)).encrypt(nonce, padded, aad)
             return {
                 "ciphertext": base64.b64encode(ct).decode("ascii"),
@@ -220,6 +231,7 @@ class Session:
         ratchet_pub_b64: str,
         pn: int,
         n: int,
+        device_id: str = "",
     ) -> str:
         try:
             ct = base64.b64decode(ciphertext_b64, validate=True)
@@ -234,7 +246,7 @@ class Session:
         cache_key = (their_pub.hex(), n)
         if cache_key in self.skipped:
             mk = self.skipped.pop(cache_key)
-            return self._open(ct, nonce, mk, their_pub, pn, n)
+            return self._open(ct, nonce, mk, their_pub, pn, n, device_id)
 
         # 2. New DH ratchet pub — advance state and skip any leftover keys.
         if self.dhr_bytes != their_pub:
@@ -243,12 +255,12 @@ class Session:
         # 3. Skip ahead in the current recv chain to reach n.
         if n < self.n_recv:
             raise ValueError("decrypt: message older than chain (not cached)")
-        # Reject before the loop: a malicious n must never spin the chain.
-        if n - self.n_recv > MAX_SKIPPED:
-            raise ValueError("decrypt: too many skipped keys")
+        if n - self.n_recv > MAX_SKIP:
+            raise ValueError(
+                f"MAX_SKIP exceeded: message index {n} is {n - self.n_recv} "
+                f"ahead of n_recv={self.n_recv}. Rejecting to prevent memory DoS."
+            )
         while self.n_recv < n:
-            if len(self.skipped) >= MAX_SKIPPED:
-                raise ValueError("decrypt: too many skipped keys")
             new_ck, mk_skip = advance_chain(self.ck_recv)
             self.ck_recv = new_ck
             self.skipped[(their_pub.hex(), self.n_recv)] = mk_skip
@@ -257,7 +269,7 @@ class Session:
         new_ck, mk = advance_chain(self.ck_recv)
         self.ck_recv = new_ck
         self.n_recv += 1
-        return self._open(ct, nonce, mk, their_pub, pn, n)
+        return self._open(ct, nonce, mk, their_pub, pn, n, device_id)
 
     def _open(
         self,
@@ -267,10 +279,11 @@ class Session:
         their_pub: bytes,
         pn: int,
         n: int,
+        device_id: str = "",
     ) -> str:
         mk_buf = bytearray(mk)
         try:
-            aad = self._make_aad(their_pub, pn, n)
+            aad = self._make_aad(their_pub, pn, n, device_id)
             try:
                 padded = AESGCM(bytes(mk_buf)).decrypt(nonce, ct, aad)
             except Exception as exc:
@@ -287,12 +300,13 @@ class Session:
         # Drain the remaining keys of the OLD recv chain so out-of-order
         # messages from before the peer's ratchet are still decryptable.
         if self.ck_recv is not None and self.dhr_bytes is not None:
-            # Reject before the loop: a malicious their_pn must never spin the chain.
-            if their_pn - self.n_recv > MAX_SKIPPED:
-                raise ValueError("dh_ratchet: too many skipped keys")
+            if their_pn - self.n_recv > MAX_SKIP:
+                raise ValueError(
+                    f"MAX_SKIP exceeded in DH ratchet: PN={their_pn} is "
+                    f"{their_pn - self.n_recv} ahead of n_recv={self.n_recv}. "
+                    "Rejecting to prevent memory DoS."
+                )
             while self.n_recv < their_pn:
-                if len(self.skipped) >= MAX_SKIPPED:
-                    raise ValueError("dh_ratchet: too many skipped keys")
                 new_ck, mk_skip = advance_chain(self.ck_recv)
                 self.ck_recv = new_ck
                 self.skipped[(self.dhr_bytes.hex(), self.n_recv)] = mk_skip

@@ -43,11 +43,14 @@ An end-to-end encrypted messaging system with a blockchain audit trail, built as
 | Forward secrecy | Double Ratchet symmetric ratchet — fresh AES-256-GCM key per message, erased after use |
 | Post-compromise security | Double Ratchet DH ratchet — new X25519 keypair injected every round-trip, heals ratchet state after one undisturbed reply |
 | Password storage | Argon2id (64 MiB, 3 iterations, parallelism 4) |
+| At-rest key protection (web client) | Private keys (IK, SPK, OPKs) encrypted in IndexedDB under an AES-256-GCM wrapping key derived from the user's password via PBKDF2-SHA256 (600k iterations) → HKDF-SHA256 (domain-separated with `EPIC-v1-wrap-key`); wrapping key held in JS memory only, never persisted |
 | Session tokens | Short-lived JWTs (HS256, 30 min expiry) stored in an httpOnly, Secure, SameSite=Strict cookie — never readable by JavaScript |
 | CSRF protection | Double-submit cookie pattern — server sets a readable `csrf_token` cookie on login; every state-changing request must echo it in the `X-CSRF-Token` header |
 | Brute-force protection | slowapi: `/register` and `/login` rate-limited to 5 req/min per IP (HTTP 429 + Retry-After); 5 consecutive failures trigger a 1-hour lockout via Redis TTL counter |
 | HTTP security headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`, `Strict-Transport-Security: max-age=31536000; includeSubDomains` (production only) — applied globally via middleware |
-| Tamper-evidence | keccak256 hash of each ciphertext anchored to Ethereum |
+| Cover traffic (web client) | After WebSocket connection, server sends randomised 256-byte heartbeat frames at uniform [3, 10] s intervals; frames are same size as padded message payloads, reducing timing correlation between send and receive events |
+| TOFU key pinning (web client) | On first contact, the SHA-256 fingerprint of the recipient's X25519 IK is stored in IndexedDB; every subsequent lookup compares against the pin — mismatch triggers a visible security warning and blocks the contact |
+| Tamper-evidence | keccak256 hash of each ciphertext anchored to Ethereum; in-app "Verify" button confirms on-chain vs local digest and links to Etherscan |
 
 ---
 
@@ -408,6 +411,36 @@ Recipient (client)                       Server
     │   (store any skipped keys)           │
     └── AES-256-GCM.Open(ciphertext) → plaintext
 ```
+
+---
+
+## Web Client Security Features
+
+### At-rest key wrapping
+
+Private keys generated in the browser are never stored in plaintext. On registration:
+
+1. PBKDF2-SHA256 (600 000 iterations) is run over the user's password + a 16-byte random salt.
+2. The resulting bits are passed through HKDF-SHA256 (info=`EPIC-v1-wrap-key`) for domain separation.
+3. The final AES-256-GCM key is used to `wrapKey` (PKCS#8 format) all three private keys — IK, SPK, and each OPK — before they are written to IndexedDB.
+4. The wrapping key is held in JavaScript memory only (`wrappingKey` variable) and cleared on logout.
+
+On login, the same derivation is re-run from the entered password to unwrap the stored blobs. Users who registered before this feature was introduced see a dismissable migration banner prompting them to re-register.
+
+### TOFU key pinning
+
+The first time a contact is added, their X25519 identity key fingerprint (SHA-256, hex-encoded) is stored in a separate `tofu-store` IndexedDB database. Every subsequent key bundle fetch compares the new fingerprint against the stored pin. A mismatch blocks the contact and shows a prominent red banner — the user must explicitly dismiss it. Fingerprints are displayed in the contact sidebar (⚠ for new, ✓ for pinned) and in the chat header.
+
+### WebSocket + cover traffic
+
+After login the client opens a WebSocket connection (`wss://` in production). The server immediately starts sending randomised 256-byte heartbeat frames at uniform [3, 10] s intervals. These frames have the same wire size as padded real-message frames, making it harder to correlate message timing from network observations alone. The client silently discards any frame whose `type` is not `"new_message"`. If the socket closes, the client falls back to HTTP polling and attempts to reconnect after 5 s.
+
+### Blockchain verify UI
+
+Each conversation header shows a "⛓ Verify" button once a contact has been added. Clicking it calls `GET /public/verify/{conversation_id}`, compares the local message digest against the on-chain record, and shows:
+
+- ✓ **Chain verified** — digest matches, with timestamp and an Etherscan link.
+- ✗ **Mismatch** — truncated on-chain vs local digests for inspection.
 
 ---
 
