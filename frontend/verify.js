@@ -75,10 +75,6 @@ async function runVerify() {
 
   spinner.style.display = "none";
 
-  if (status === 401 || status === 403) {
-    showError("You need to be signed in to verify a conversation. Sign in first, then return to this page.");
-    return;
-  }
   if (status === 404) {
     showError("No blockchain record found for this conversation. Either the conversation ID is wrong or on-chain recording has not completed yet.");
     return;
