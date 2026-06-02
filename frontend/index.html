@@ -142,7 +142,15 @@
       </header>
 
       <!-- Key fingerprint display (populated when contact selected) -->
-      <div id="chat-fp"></div>
+      <div id="chat-fp">
+        <span id="chat-fp-text"></span>
+        <button id="btn-copy-fp" aria-label="Copy key fingerprint" style="display:none;">
+          <svg id="copy-fp-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <rect x="5" y="5" width="8" height="10" rx="1.5"/>
+            <path d="M3 11V3a1 1 0 0 1 1-1h8"/>
+          </svg>
+        </button>
+      </div>
 
       <!-- Inline blockchain verify result panel -->
       <div id="verify-result-panel" style="display:none;"></div>

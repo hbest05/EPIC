@@ -8,7 +8,6 @@
  *   [x] storeHash — reverts on duplicate messageId
  *   [x] getRecord — returns stored hash, timestamp, and exists flag
  *   [x] verifyHash — returns true for matching hash, false for mismatch
- *   [ ] storeHashBatch — stores multiple hashes (TODO: implement after contract)
  *   [x] Access control — non-owner cannot call storeHash
  */
 
