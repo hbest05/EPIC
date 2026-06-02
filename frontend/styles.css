@@ -154,6 +154,35 @@ body {
   z-index: 1;
 }
 
+/* Form field wrapper — used by login/register for inline error display */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 100%;
+}
+
+input.invalid {
+  border-color: #ef4444 !important;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.3) !important;
+}
+
+.field-error {
+  font-size: 12px;
+  color: #ef4444;
+  min-height: 1em;
+  font-family: var(--font-serif);
+  padding-left: 8px;
+}
+
+.form-error {
+  font-size: 13px;
+  color: #ef4444;
+  font-family: var(--font-serif);
+  width: 100%;
+  text-align: center;
+}
+
 /* Heading row: logo + title */
 .auth-heading {
   display: flex;
@@ -589,8 +618,10 @@ body {
   text-overflow: ellipsis;
 }
 
-/* Verify pill button */
+/* Verify pill button (inline blockchain verify) */
 .verify-pill {
+  display: inline-flex;
+  align-items: center;
   background: rgba(180, 170, 195, 0.25);
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 50px;
@@ -599,6 +630,7 @@ body {
   font-size: 15px;
   padding: 8px 24px;
   text-decoration: none;
+  cursor: pointer;
   flex-shrink: 0;
   transition: background 0.15s;
 }
@@ -607,7 +639,27 @@ body {
   background: rgba(180, 170, 195, 0.4);
 }
 
-/* Messages wrapper — scrollable area that contains the button + list */
+/* Key fingerprint display below chat header */
+#chat-fp {
+  padding: 4px 20px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.35);
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+/* Inline blockchain verify result panel */
+#verify-result-panel {
+  padding: 8px 20px;
+  font-size: 13px;
+  font-family: var(--font-serif);
+  color: rgba(255, 255, 255, 0.8);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+/* Messages wrapper — outer scrollable container */
 #messages-wrapper {
   flex: 1;
   overflow-y: auto;
@@ -812,3 +864,16 @@ body {
     display: none;
   }
 }
+
+.msg-ts       { font-size: 0.7rem; color: #6b7280; margin-left: 6px; }
+.contact-fp   { font-size: 0.68rem; color: #94a3b8; font-family: monospace; word-break: break-all; margin-top: 2px; }
+.fp-new       { color: #f59e0b; font-size: 0.68rem; }
+.fp-pinned    { color: #34d399; font-size: 0.68rem; }
+.btn-small    { width: auto; padding: 0.25rem 0.6rem; font-size: 0.78rem; }
+.btn-secondary { background: #374151; }
+.btn-secondary:hover { background: #4b5563; }
+
+#chat-header { display: flex; flex-direction: column; gap: 2px; padding: 0.5rem 1rem; border-bottom: 1px solid #2d3148; }
+#chat-header-row { display: flex; align-items: center; justify-content: space-between; }
+#chat-fp { font-size: 0.68rem; color: #94a3b8; font-family: monospace; }
+

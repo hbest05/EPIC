@@ -68,8 +68,10 @@ app.include_router(ws.router, tags=["ws"])
 app.include_router(blockchain.public_router,        prefix="/public/verify",     tags=["verify-public"])
 
 
-app.mount("/static", StaticFiles(directory="/app/frontend"), name="static")
-app.mount("/public", StaticFiles(directory="/app/public"),   name="public-static")
+# html=True enables SPA-style routing (serves index.html for directory paths).
+app.mount("/static", StaticFiles(directory="/app/frontend", html=True), name="static")
+# Public assets (video, SVGs) — registered after API routes so /public/verify still resolves.
+app.mount("/public", StaticFiles(directory="/app/public"), name="public-static")
 
 
 @app.on_event("startup")

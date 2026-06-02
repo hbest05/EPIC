@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir)",
+      "Bash(docker compose *)",
+      "Bash(docker --version)",
+      "Bash(pg_isready -h localhost -p 5432)",
+      "Bash(pg_isready -h localhost -p 5433)",
+      "Bash(redis-cli ping *)"
+    ]
+  }
+}

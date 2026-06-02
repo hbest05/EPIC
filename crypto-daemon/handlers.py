@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import logging
 import uuid
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -36,7 +36,7 @@ class DaemonState:
     """In-memory state shared across all connections for the daemon lifetime."""
 
     def __init__(self):
-        self.identity: identity_mod.Identity | None = None
+        self.identity: Optional[identity_mod.Identity] = None
         # Most recent batch of generated prekeys (responder side).
         # {'spk_priv': X25519PrivateKey, 'spk_pub_bytes': bytes,
         #  'spk_sig': bytes, 'opks': {opk_pub_b64: X25519PrivateKey}}
@@ -137,6 +137,22 @@ def op_load_identity(state: DaemonState, params: dict) -> dict:
         "spk_loaded": spk is not None,
         "opks_loaded": len(opks),
     }
+
+
+def op_rekey_identity(state: DaemonState, params: dict) -> dict:
+    """Re-encrypt the loaded identity and all session files under a new
+    passphrase. No new keypairs are generated — only the at-rest encryption
+    changes. The passphrase is never logged."""
+    ident = state.require_identity()
+    new_pp = _require_str(params, "new_passphrase")
+    # Rewrites identity.enc under a fresh salt/nonce and updates
+    # state.identity.wrap_key in-place to the new wrap key.
+    identity_mod.save(ident, new_pp)
+    # Session files on disk are still encrypted under the old wrap key, so
+    # re-encrypt every loaded session under the new wrap key.
+    for sess in state.sessions.values():
+        session_store.save_session(sess, ident.wrap_key)
+    return {}
 
 
 def op_generate_prekeys(state: DaemonState, params: dict) -> dict:
@@ -370,6 +386,7 @@ def op_dh_ratchet_step(state: DaemonState, params: dict) -> dict:
 OPS: Dict[str, Callable[[DaemonState, dict], dict]] = {
     "generate_identity": op_generate_identity,
     "load_identity": op_load_identity,
+    "rekey_identity": op_rekey_identity,
     "generate_prekeys": op_generate_prekeys,
     "x3dh_send": op_x3dh_send,
     "x3dh_receive": op_x3dh_receive,

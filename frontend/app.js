@@ -1,19 +1,21 @@
 /**
- * app.js — SecureMsg web client
+ * app.js — Alphra web client
  *
- * Auth: httpOnly cookie (set by server on login) + double-submit CSRF token.
- * All requests use credentials: 'include' so cookies are sent automatically.
- * State-changing requests (POST/PUT/DELETE) attach the X-CSRF-Token header
- * by reading the readable csrf_token cookie.
+ * Auth:  httpOnly JWT cookie (set by server on login) + double-submit CSRF token.
+ *        All requests use credentials:'include' so the cookie is sent automatically.
+ *        State-changing requests (POST/PUT/DELETE) echo the readable csrf_token
+ *        cookie in the X-CSRF-Token header.
+ *
+ * Crypto: X3DH key agreement + Double Ratchet, implemented in crypto.js using
+ *         only the Web Crypto API. Private keys are AES-256-GCM encrypted at rest
+ *         in IndexedDB under keys derived from the user's password via PBKDF2→HKDF.
  */
 
 import {
   generateKeyPair,
   generateSigningPair,
   exportPublicKey,
-  importPublicKey,
   signMessage,
-  verifySignature,
   storePrivateKey,
   loadPrivateKey,
   generateOPKs,
@@ -25,29 +27,44 @@ import {
   ratchetDecrypt,
   saveSession,
   loadSession,
+  deriveStorageKeys,
+  wrapPrivateKey,
+  unwrapPrivateKey,
+  saveMessage,
+  loadMessages,
+  loadAllMessageIds,
 } from "./crypto.js";
 
-const API_BASE        = "http://localhost:8000/api";
-const POLL_INTERVAL_MS = 5000; // TODO: replace with WebSocket
+// Derive API base from the serving origin so the same build works on
+// localhost:8000 (dev) and https://cryptmunks.theburkenator.com (prod).
+// Set window.SECUREMSG_API_BASE before this script loads to override.
+const API_BASE         = (window.SECUREMSG_API_BASE ?? window.location.origin) + "/api";
+const POLL_INTERVAL_MS = 5000;
+// Mirrors C++ client kPageSize — messages shown per contact on initial load;
+// "Load older messages" reveals one more page per click.
+const PAGE_SIZE        = 30;
 
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
 
-let currentUser    = null;        // { id, username }
-let myPrivateKey   = null;        // X25519 CryptoKey (loaded from IndexedDB)
-let mySigningKey   = null;        // Ed25519 CryptoKey (loaded from IndexedDB)
-let myPublicKeyB64 = null;        // our X25519 IK public key, base64
-const contacts     = new Map();   // username → KeyBundleResponse
-const sessions     = new Map();   // username → session object (mirrors IndexedDB)
-const seenMessageIds = new Set(); // prevents re-processing fetched messages
+let currentUser    = null;  // { id, username }
+let myPrivateKey   = null;  // X25519 CryptoKey — our identity private key
+let mySigningKey   = null;  // Ed25519 CryptoKey — our signing private key
+let myPublicKeyB64 = null;  // base64 X25519 IK public key (our own)
+let wrappingKey    = null;  // AES-GCM key for wrapping CryptoKey objects; never persisted
+let storageKey     = null;  // AES-GCM key for encrypting sessions + message history; never persisted
+let ws             = null;  // WebSocket connection
+let wsReconnectTimer = null;
+
+const contacts       = new Map(); // username → KeyBundleResponse
+const sessions       = new Map(); // username → Double Ratchet session
+const messageCache   = new Map(); // convId   → [{ id, sender, plaintext, timestamp, blockchain_confirmed }]
+const renderLimits   = new Map(); // username → number of messages to render
+const seenMessageIds = new Set(); // server message IDs already processed this session
+
 let activeRecipient = null;
 let inboxPoller     = null;
-
-// In-session cache of decrypted messages, keyed by conversation partner username.
-// Never persisted — private keys stay in IndexedDB, plaintexts stay in RAM only.
-const decryptedCache  = new Map(); // username → [{sender, plaintext, meta}]
-let oldestLoadedId    = null;      // cursor for "Load older messages" pagination
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -61,12 +78,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   try {
-    currentUser    = await apiFetch("/auth/me");
-    myPrivateKey   = await loadPrivateKey("x25519");
-    mySigningKey   = await loadPrivateKey("ed25519");
-    myPublicKeyB64 = await loadPrivateKey("my_ik_pub_b64");
-    showApp();
-    startInboxPoller();
+    currentUser = await apiFetch("/auth/me");
+
+    const storedIK = await loadPrivateKey("x25519");
+    if (storedIK instanceof CryptoKey) {
+      // Pre-wrapping session — keys are non-extractable CryptoKeys. Usable
+      // directly but not encrypted at rest. Migration notice prompts re-register.
+      myPrivateKey   = storedIK;
+      mySigningKey   = await loadPrivateKey("ed25519");
+      myPublicKeyB64 = await loadPrivateKey("my_ik_pub_b64");
+      await _populateSeenIds();
+      showApp();
+      startInboxPoller();
+    } else {
+      // Wrapped keys — password needed to unwrap. Show login.
+      showAuth();
+    }
   } catch {
     showAuth();
   }
@@ -74,22 +101,121 @@ document.addEventListener("DOMContentLoaded", async () => {
   attachEventListeners();
 });
 
+// Handle bfcache restore — the browser may show a frozen snapshot on back-nav
+// without re-running DOMContentLoaded. Force re-authentication.
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted) {
+    disconnectWebSocket();
+    showAuth();
+  }
+});
+
+// Pre-populate seenMessageIds from IndexedDB so fetchInbox never tries to
+// re-decrypt messages whose ratchet keys have already been consumed.
+async function _populateSeenIds() {
+  try {
+    const ids = await loadAllMessageIds();
+    ids.forEach(id => seenMessageIds.add(String(id)));
+  } catch (err) {
+    console.warn("_populateSeenIds: could not load message IDs", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Input validation
+// ---------------------------------------------------------------------------
+
+const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
+const EMAIL_RE    = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function setFieldError(inputId, errorId, message) {
+  const input = document.getElementById(inputId);
+  const span  = document.getElementById(errorId);
+  if (!input || !span) return;
+  span.textContent = message;
+  input.classList.toggle("invalid", !!message);
+}
+
+function clearFormError(errorId) {
+  const el = document.getElementById(errorId);
+  if (el) el.textContent = "";
+}
+
+function setFormError(errorId, message) {
+  const el = document.getElementById(errorId);
+  if (el) el.textContent = message;
+}
+
+function validateLoginFields() {
+  const username = document.getElementById("login-username").value.trim();
+  const password = document.getElementById("login-password").value;
+  let valid = true;
+
+  if (!username) {
+    setFieldError("login-username", "login-username-error", "Username is required.");
+    valid = false;
+  } else {
+    setFieldError("login-username", "login-username-error", "");
+  }
+
+  if (!password) {
+    setFieldError("login-password", "login-password-error", "Password is required.");
+    valid = false;
+  } else {
+    setFieldError("login-password", "login-password-error", "");
+  }
+
+  return valid;
+}
+
+function validateRegisterFields() {
+  const username = document.getElementById("reg-username")?.value.trim() ?? "";
+  const email    = document.getElementById("reg-email")?.value.trim()    ?? "";
+  const password = document.getElementById("reg-password")?.value        ?? "";
+  let valid = true;
+
+  if (!USERNAME_RE.test(username)) {
+    setFieldError("reg-username", "reg-username-error", "3–20 chars, letters/numbers/underscore only.");
+    valid = false;
+  } else {
+    setFieldError("reg-username", "reg-username-error", "");
+  }
+
+  if (!EMAIL_RE.test(email)) {
+    setFieldError("reg-email", "reg-email-error", "Enter a valid email address.");
+    valid = false;
+  } else {
+    setFieldError("reg-email", "reg-email-error", "");
+  }
+
+  if (password.length < 12) {
+    setFieldError("reg-password", "reg-password-error", "Password must be at least 12 characters.");
+    valid = false;
+  } else {
+    setFieldError("reg-password", "reg-password-error", "");
+  }
+
+  return valid;
+}
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
 
 async function register() {
-  const username = document.getElementById("reg-username").value.trim();
-  const email    = document.getElementById("reg-email").value.trim();
-  const password = document.getElementById("reg-password").value;
+  clearFormError("reg-form-error");
+  if (!validateRegisterFields()) return;
 
+  const username = document.getElementById("reg-username")?.value.trim();
+  const email    = document.getElementById("reg-email")?.value.trim();
+  const password = document.getElementById("reg-password")?.value;
+
+  const registerBtn = document.getElementById("btn-register");
   try {
-    // Generate long-term keypairs — private keys never leave the browser.
-    const { publicKey: x25519Pub, privateKey: x25519Priv } = await generateKeyPair();
-    const { publicKey: ed25519Pub, privateKey: ed25519Priv } = await generateSigningPair();
-
-    const x25519PubB64 = await exportPublicKey(x25519Pub);
-    const ed25519PubB64 = await exportPublicKey(ed25519Pub);
+    const ikKeypair      = await generateKeyPair();
+    const signingKeypair = await generateSigningPair();
+    const ikPubB64       = await exportPublicKey(ikKeypair.publicKey);
+    const signingPubB64  = await exportPublicKey(signingKeypair.publicKey);
 
     await apiFetch("/auth/register", {
       method: "POST",
@@ -97,133 +223,190 @@ async function register() {
         username,
         email,
         password,
-        x25519_public_key: x25519PubB64,
-        ed25519_public_key: ed25519PubB64,
+        x25519_public_key:  ikPubB64,
+        ed25519_public_key: signingPubB64,
+        client_type:        "web",
       }),
     });
 
-    // Persist long-term private keys in IndexedDB only after server confirms.
-    await storePrivateKey("x25519",        x25519Priv);
-    await storePrivateKey("ed25519",       ed25519Priv);
-    await storePrivateKey("my_ik_pub_b64", x25519PubB64);
-
-    // Generate SPK (extractable so it can be used as initial DHs in X3DH receive).
-    const spkKP = await crypto.subtle.generateKey(
-      { name: "X25519" },
-      true,
-      ["deriveBits"],
-    );
-    const spkPubB64 = await exportPublicKey(spkKP.publicKey);
-
-    // Sign raw SPK pub bytes with Ed25519 IK.
+    // Generate the signed prekey (SPK).
+    const spkKeypair  = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+    const spkPubB64   = await exportPublicKey(spkKeypair.publicKey);
     const spkPubBytes = Uint8Array.from(atob(spkPubB64), c => c.charCodeAt(0));
-    const spkSigB64   = await signMessage(spkPubBytes.buffer, ed25519Priv);
+    const spkSigB64   = await signMessage(spkPubBytes.buffer, signingKeypair.privateKey);
 
-    // Store SPK private CryptoKey and its public key b64 for use in X3DH receive.
-    await storePrivateKey("spk",        spkKP.privateKey);
-    await storePrivateKey("spk_pub_b64", spkPubB64);
+    // Login to get the auth cookie before uploading prekeys (prekeys require auth).
+    if (registerBtn) registerBtn.textContent = "Generating keys…";
+    currentUser = await apiFetch("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password, client_type: "web" }),
+    });
 
-    // Generate 10 OPKs (private keys stored in IndexedDB by generateOPKs).
-    const opks = await generateOPKs(10);
+    // Derive both storage keys in a single PBKDF2 pass.
+    const keySalt = crypto.getRandomValues(new Uint8Array(16));
+    ({ wrappingKey, storageKey } = await deriveStorageKeys(password, keySalt));
 
-    // Upload prekeys.
+    // Wrap all private keys before persisting to IndexedDB.
+    await storePrivateKey("wrap_salt",      keySalt);
+    await storePrivateKey("x25519",         await wrapPrivateKey(ikKeypair.privateKey,      wrappingKey));
+    await storePrivateKey("ed25519",        await wrapPrivateKey(signingKeypair.privateKey, wrappingKey));
+    await storePrivateKey("spk",            await wrapPrivateKey(spkKeypair.privateKey,      wrappingKey));
+    await storePrivateKey("my_ik_pub_b64",  ikPubB64);
+    await storePrivateKey("spk_pub_b64",    spkPubB64);
+    await storePrivateKey("spk_created_at", Date.now());
+
+    const opks  = await generateOPKs(10, wrappingKey);
     const keyId = Math.floor(Date.now() / 1000);
+
     await apiFetch("/auth/prekeys", {
       method: "POST",
       body: JSON.stringify({
-        signed_prekey: {
-          key_id:    keyId,
-          public_key: spkPubB64,
-          signature:  spkSigB64,
-        },
+        signed_prekey:    { key_id: keyId, public_key: spkPubB64, signature: spkSigB64 },
         one_time_prekeys: await Promise.all(
-          opks.map(async (kp, i) => ({
-            key_id:    keyId * 100 + i,
-            public_key: await exportPublicKey(kp.publicKey),
-          })),
+          opks.map(async (kp, i) => ({ key_id: keyId * 100 + i, public_key: await exportPublicKey(kp.publicKey) })),
         ),
       }),
     });
 
-    // Auto-login.
-    currentUser = await apiFetch("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password }),
-    });
-    myPrivateKey   = await loadPrivateKey("x25519");
-    mySigningKey   = await loadPrivateKey("ed25519");
-    myPublicKeyB64 = x25519PubB64;
+    myPrivateKey   = ikKeypair.privateKey;
+    mySigningKey   = signingKeypair.privateKey;
+    myPublicKeyB64 = ikPubB64;
+    if (registerBtn) registerBtn.textContent = "Register & Generate Keys";
     showApp();
+    await _populateSeenIds();
     startInboxPoller();
   } catch (err) {
-    alert(err.message);
+    setFormError("reg-form-error", err.message);
+    if (registerBtn) registerBtn.textContent = "Register & Generate Keys";
   }
 }
 
 async function login() {
+  clearFormError("login-form-error");
+  if (!validateLoginFields()) return;
+
   const username = document.getElementById("login-username").value.trim();
   const password = document.getElementById("login-password").value;
+  const loginBtn = document.getElementById("btn-login");
 
   try {
-    currentUser    = await apiFetch("/auth/login", {
+    currentUser = await apiFetch("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, client_type: "web" }),
     });
-    myPrivateKey   = await loadPrivateKey("x25519");
-    mySigningKey   = await loadPrivateKey("ed25519");
+
+    const storedIK = await loadPrivateKey("x25519");
+    if (storedIK instanceof CryptoKey) {
+      // Pre-wrapping session — use keys directly and show a migration notice.
+      myPrivateKey = storedIK;
+      mySigningKey = await loadPrivateKey("ed25519");
+      showMigrationNotice();
+    } else if (storedIK?.wrapped) {
+      const keySalt = await loadPrivateKey("wrap_salt");
+      if (!keySalt) throw new Error("Corrupt key store — please re-register.");
+
+      if (loginBtn) loginBtn.textContent = "Unlocking keys…";
+      ({ wrappingKey, storageKey } = await deriveStorageKeys(password, keySalt));
+
+      const storedSigningKey = await loadPrivateKey("ed25519");
+      myPrivateKey = await unwrapPrivateKey(storedIK.ciphertext,        storedIK.nonce,        wrappingKey, { name: "X25519" },  ["deriveKey", "deriveBits"], true);
+      mySigningKey = await unwrapPrivateKey(storedSigningKey.ciphertext, storedSigningKey.nonce, wrappingKey, { name: "Ed25519" }, ["sign"], true);
+    } else {
+      throw new Error("No keys found — please register.");
+    }
+
     myPublicKeyB64 = await loadPrivateKey("my_ik_pub_b64");
     showApp();
+    await _populateSeenIds();
     startInboxPoller();
+    maybeReplenishPrekeys().catch(err => console.error("prekey replenishment failed:", err));
   } catch (err) {
-    alert(err.message);
+    setFormError("login-form-error", err.message);
+  } finally {
+    if (loginBtn) loginBtn.textContent = "Enter";
   }
+}
+
+function showMigrationNotice() {
+  const banner = document.createElement("div");
+  banner.style.cssText = "position:fixed;top:0;left:0;right:0;background:#92400e;color:#fff;padding:12px 20px;font-size:14px;z-index:9999;text-align:center;";
+  banner.textContent = "Your keys were stored without encryption. Re-register to enable at-rest key protection.";
+  const btn = document.createElement("button");
+  btn.textContent  = "Dismiss";
+  btn.style.cssText = "margin-left:16px;padding:3px 12px;font-size:13px;cursor:pointer;";
+  btn.onclick = () => banner.remove();
+  banner.appendChild(btn);
+  document.body.prepend(banner);
 }
 
 async function logout() {
   try {
     await apiFetch("/auth/logout", { method: "POST" });
   } finally {
+    // Clear all session state so a subsequent login as a different user starts clean.
     currentUser    = null;
     myPrivateKey   = null;
     mySigningKey   = null;
     myPublicKeyB64 = null;
+    wrappingKey    = null;
+    storageKey     = null;
+    activeRecipient = null;
+    contacts.clear();
+    sessions.clear();
+    messageCache.clear();
+    renderLimits.clear();
+    seenMessageIds.clear();
+    disconnectWebSocket();
     stopInboxPoller();
     showAuth();
   }
 }
 
 // ---------------------------------------------------------------------------
-// TOFU key pinning — persistent IndexedDB store
+// TOFU key pinning
 // ---------------------------------------------------------------------------
 
 const TOFU_DB_NAME    = "tofu-store";
 const TOFU_STORE_NAME = "pins";
+// v2: scoped composite keys ("ownerUsername:contactUsername") prevent cross-account
+// pin reuse on a shared device. v1 records are cleared on upgrade.
+const TOFU_DB_VERSION = 2;
 
 function openTofuDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(TOFU_DB_NAME, 1);
+    const req = indexedDB.open(TOFU_DB_NAME, TOFU_DB_VERSION);
     req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore(TOFU_STORE_NAME, { keyPath: "username" });
+      const db = e.target.result;
+      if (e.oldVersion < 2) {
+        if (db.objectStoreNames.contains(TOFU_STORE_NAME)) {
+          db.deleteObjectStore(TOFU_STORE_NAME);
+        }
+        db.createObjectStore(TOFU_STORE_NAME);
+      }
     };
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror   = (e) => reject(e.target.error);
   });
 }
 
-async function getPin(username) {
+function _tofuKey(contactUsername) {
+  return `${currentUser.username}:${contactUsername}`;
+}
+
+async function getPin(contactUsername) {
   const db = await openTofuDb();
   return new Promise((resolve, reject) => {
-    const req = db.transaction(TOFU_STORE_NAME).objectStore(TOFU_STORE_NAME).get(username);
+    const req = db.transaction(TOFU_STORE_NAME).objectStore(TOFU_STORE_NAME).get(_tofuKey(contactUsername));
     req.onsuccess = () => resolve(req.result ?? null);
     req.onerror   = () => reject(req.error);
   });
 }
 
-async function storePin(username, ikFingerprint) {
+async function storePin(contactUsername, fingerprint) {
   const db = await openTofuDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(TOFU_STORE_NAME, "readwrite");
-    tx.objectStore(TOFU_STORE_NAME).put({ username, ikFingerprint, pinnedAt: new Date().toISOString() });
+    tx.objectStore(TOFU_STORE_NAME).put({ fingerprint, pinnedAt: new Date().toISOString() }, _tofuKey(contactUsername));
     tx.oncomplete = () => resolve();
     tx.onerror    = () => reject(tx.error);
   });
@@ -238,39 +421,114 @@ async function computeFingerprint(rawB64) {
 function showKeyChangeWarning(username) {
   const banner = document.createElement("div");
   banner.style.cssText = [
-    "position:fixed","top:0","left:0","right:0",
-    "background:#c0392b","color:#fff","padding:16px 24px",
-    "font-size:15px","font-weight:bold","z-index:9999","text-align:center",
+    "position:fixed", "top:0", "left:0", "right:0",
+    "background:#c0392b", "color:#fff", "padding:16px 24px",
+    "font-size:15px", "font-weight:bold", "z-index:9999", "text-align:center",
   ].join(";");
   banner.textContent = `⚠ Security warning: key changed for ${username}. Possible MITM attack. Contact blocked.`;
-  const dismiss = document.createElement("button");
-  dismiss.textContent = "Dismiss";
-  dismiss.style.cssText = "margin-left:20px;padding:4px 14px;font-size:14px;cursor:pointer;";
-  dismiss.onclick = () => banner.remove();
-  banner.appendChild(dismiss);
+  const dismissBtn = document.createElement("button");
+  dismissBtn.textContent = "Dismiss";
+  dismissBtn.style.cssText = "margin-left:20px;padding:4px 14px;font-size:14px;cursor:pointer;";
+  dismissBtn.onclick = () => banner.remove();
+  banner.appendChild(dismissBtn);
   document.body.prepend(banner);
 }
 
-/**
- * Fetch a contact's full X3DH key bundle and enforce TOFU pinning.
- *
- * First contact: fingerprint is computed from ik_x25519 and pinned in IndexedDB.
- * Subsequent contacts: fingerprint is compared — mismatch blocks the contact
- * and shows a visible security warning. Never silently accepts a key change.
- */
+// Fetch a contact's key bundle and enforce TOFU pinning.
+// First contact: pin the fingerprint. Subsequent: compare — mismatch blocks.
 async function fetchContactKeybundle(username) {
   const bundle      = await apiFetch(`/auth/user/${username}/keybundle`);
   const fingerprint = await computeFingerprint(bundle.ik_x25519);
+  const pin         = await getPin(username);
+  const isFirstContact = pin === null;
 
-  const pin = await getPin(username);
-  if (pin === null) {
+  if (isFirstContact) {
     await storePin(username, fingerprint);
-  } else if (pin.ikFingerprint !== fingerprint) {
+  } else if (pin.fingerprint !== fingerprint) {
     showKeyChangeWarning(username);
     throw new Error(`TOFU violation: key changed for ${username}`);
   }
+
   contacts.set(username, bundle);
+  addContactToSidebar(username, fingerprint, isFirstContact);
   return bundle;
+}
+
+// ---------------------------------------------------------------------------
+// Conversation ID helpers
+// ---------------------------------------------------------------------------
+
+// Local conversation ID — username pair sorted alphabetically.
+function localConvId(usernameA, usernameB) {
+  return [usernameA, usernameB].sort().join(":");
+}
+
+// Server-side conversation ID — UUID pair sorted lexicographically.
+function serverConvId(uuid1, uuid2) {
+  return [uuid1, uuid2].sort().join("_");
+}
+
+// ---------------------------------------------------------------------------
+// Message persistence
+// ---------------------------------------------------------------------------
+
+// Encrypt and persist a message, keep the in-memory cache live.
+// Silent no-op if storageKey is null (pre-wrapping session).
+async function persistMessage(sender, recipient, plaintext, msgId, timestamp, blockchainConfirmed = false) {
+  const convId = localConvId(sender, recipient);
+  const entry  = {
+    id:                   String(msgId),
+    sender,
+    plaintext,
+    timestamp:            timestamp ?? Date.now(),
+    blockchain_confirmed: blockchainConfirmed,
+  };
+
+  if (messageCache.has(convId)) {
+    const msgs = messageCache.get(convId);
+    if (!msgs.find(m => m.id === entry.id)) {
+      msgs.push(entry);
+      msgs.sort((a, b) => a.timestamp - b.timestamp);
+    }
+  }
+
+  if (!storageKey) return;
+  try {
+    await saveMessage(convId, entry, storageKey);
+  } catch (err) {
+    console.warn("persistMessage: storage failed", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Thread rendering
+// ---------------------------------------------------------------------------
+
+// Re-render the message list from the in-memory cache, showing only the last
+// renderLimits[username] messages (default PAGE_SIZE).
+function renderThread(username) {
+  const list = document.getElementById("message-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const convId = localConvId(currentUser?.username ?? "", username);
+  const all    = messageCache.get(convId) ?? [];
+  const limit  = renderLimits.get(username) ?? PAGE_SIZE;
+  const start  = Math.max(0, all.length - limit);
+
+  for (let i = start; i < all.length; i++) {
+    _appendBubble(list, all[i].sender, all[i].plaintext, {
+      timestamp:            all[i].timestamp,
+      blockchain_confirmed: all[i].blockchain_confirmed ?? false,
+      id:                   all[i].id,
+    });
+  }
+
+  const loadOlderBtn = document.getElementById("btn-load-older");
+  if (loadOlderBtn) loadOlderBtn.style.display = start > 0 ? "flex" : "none";
+
+  const wrapper = document.getElementById("messages-wrapper");
+  if (wrapper) wrapper.scrollTop = wrapper.scrollHeight;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,57 +542,59 @@ async function sendMessage() {
   if (!plaintext) return;
 
   try {
-    let session = sessions.get(activeRecipient) ?? await loadSession(activeRecipient);
+    let session = sessions.get(activeRecipient) ?? await loadSession(activeRecipient, storageKey);
 
     if (!session) {
-      // First message to this contact: run X3DH to establish session.
       const bundle = contacts.get(activeRecipient) ?? await fetchContactKeybundle(activeRecipient);
-      const { SK, EK_A_pub_b64, usedOPKPub_b64 } = await x3dhSend(myPrivateKey, bundle);
+      const { SK, ephemeralPubB64, usedOPKPub } = await x3dhSend(myPrivateKey, bundle);
 
       session = await initSessionAsSender(SK, bundle.spk.public_key, myPublicKeyB64, bundle.ik_x25519);
-      // Store ephemeral key so the first message can carry the X3DH header.
-      session.x3dh_ek_pub  = EK_A_pub_b64;
-      session.x3dh_opk_pub = usedOPKPub_b64;
+      session.x3dh_ephemeral_pub = ephemeralPubB64;
+      session.x3dh_used_opk_pub  = usedOPKPub;
     }
 
-    const result = await ratchetEncrypt(session, plaintext);
+    const encrypted = await ratchetEncrypt(session, plaintext);
 
     let x3dhHeader = null;
     if (!session.x3dh_header_sent) {
       x3dhHeader = {
         ik_a:         myPublicKeyB64,
-        ek_a:         session.x3dh_ek_pub,
-        used_opk_pub: session.x3dh_opk_pub,
+        ek_a:         session.x3dh_ephemeral_pub,
+        used_opk_pub: session.x3dh_used_opk_pub,
       };
       session.x3dh_header_sent = true;
     }
 
     sessions.set(activeRecipient, session);
-    await saveSession(activeRecipient, session);
+    await saveSession(activeRecipient, session, storageKey);
 
     await apiFetch("/messages/send", {
       method: "POST",
       body: JSON.stringify({
         recipient_username: activeRecipient,
-        ciphertext:   result.ciphertext_b64,
-        nonce:        result.nonce_b64,
-        ratchet_pub:  result.ratchet_pub_b64,
-        pn:           result.pn,
-        n:            result.n,
-        x3dh_header:  x3dhHeader,
+        ciphertext:  encrypted.ciphertext_b64,
+        nonce:       encrypted.nonce_b64,
+        ratchet_pub: encrypted.ratchet_pub_b64,
+        pn:          encrypted.pn,
+        n:           encrypted.n,
+        x3dh_header: x3dhHeader,
       }),
     });
 
-    renderMessage(currentUser.username, plaintext, {
-      timestamp:            new Date().toISOString(),
-      blockchain_confirmed: false,
-    });
+    const sentAt = Date.now();
+    const sentId = "sent-" + sentAt + "-" + Math.random().toString(36).slice(2);
+    await persistMessage(currentUser.username, activeRecipient, plaintext, sentId, sentAt, false);
+    renderThread(activeRecipient);
     input.value = "";
   } catch (err) {
     console.error("sendMessage failed:", err);
     alert("Send failed: " + err.message);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Inbox polling
+// ---------------------------------------------------------------------------
 
 async function fetchInbox() {
   try {
@@ -344,13 +604,24 @@ async function fetchInbox() {
       seenMessageIds.add(msg.id);
 
       const sender = msg.sender_username;
-
       try {
-        let session = sessions.get(sender) ?? await loadSession(sender);
+        let session = sessions.get(sender) ?? await loadSession(sender, storageKey);
 
         if (!session && msg.x3dh_header) {
-          const { SK } = await x3dhReceive(myPrivateKey, msg.x3dh_header);
-          session = await initSessionAsReceiver(SK, msg.x3dh_header.ik_a, myPublicKeyB64);
+          // Validate ik_a against any existing TOFU pin before deriving the
+          // session — a compromised server could substitute a malicious identity
+          // key in the X3DH header to hijack the session silently.
+          const existingPin = await getPin(sender);
+          if (existingPin !== null) {
+            const inboundFingerprint = await computeFingerprint(msg.x3dh_header.ik_a);
+            if (inboundFingerprint !== existingPin.fingerprint) {
+              console.error("fetchInbox: x3dh_header.ik_a does not match pinned key for", sender);
+              showKeyChangeWarning(sender);
+              continue;
+            }
+          }
+          const { SK } = await x3dhReceive(myPrivateKey, msg.x3dh_header, wrappingKey);
+          session = await initSessionAsReceiver(SK, msg.x3dh_header.ik_a, myPublicKeyB64, wrappingKey);
         }
 
         if (!session) {
@@ -358,32 +629,177 @@ async function fetchInbox() {
           continue;
         }
 
-        const plaintext = await ratchetDecrypt(
-          session,
-          { ciphertext: msg.ciphertext, nonce: msg.nonce, ratchet_pub: msg.ratchet_pub, pn: msg.pn, n: msg.n },
-          session.ik_a,
-          session.ik_b,
-        );
+        const plaintext = await ratchetDecrypt(session, {
+          ciphertext:  msg.ciphertext,
+          nonce:       msg.nonce,
+          ratchet_pub: msg.ratchet_pub,
+          pn:          msg.pn,
+          n:           msg.n,
+        });
 
         sessions.set(sender, session);
-        await saveSession(sender, session);
+        await saveSession(sender, session, storageKey);
 
-        renderMessage(sender, plaintext, {
-          timestamp:            msg.created_at,
-          blockchain_confirmed: msg.blockchain_confirmed,
-          id:                   msg.id,
-        });
+        const receivedAt = msg.created_at ? Date.parse(msg.created_at) || Date.now() : Date.now();
+        await persistMessage(sender, currentUser.username, plaintext, msg.id, receivedAt, msg.blockchain_confirmed ?? false);
+
+        if (sender === activeRecipient) renderThread(sender);
       } catch (err) {
         console.error("fetchInbox: failed to decrypt message from", sender, err);
       }
     }
   } catch (err) {
-    console.error("fetchInbox: inbox fetch failed", err);
+    console.error("fetchInbox: request failed", err);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Inbox polling
+// Blockchain verification
+// ---------------------------------------------------------------------------
+
+async function verifyBlockchain(username) {
+  const bundle = contacts.get(username);
+  if (!bundle?.user_id) {
+    const panel = document.getElementById("verify-result-panel");
+    if (panel) { panel.textContent = "Re-add this contact to enable verification."; panel.style.display = "block"; }
+    return;
+  }
+
+  const convId = serverConvId(currentUser.id, bundle.user_id);
+  const panel  = document.getElementById("verify-result-panel");
+  if (panel) { panel.textContent = "Verifying…"; panel.style.display = "block"; }
+
+  try {
+    const res = await fetch(
+      `${window.location.origin}/public/verify/${encodeURIComponent(convId)}`,
+      { credentials: "include" },
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (panel) panel.textContent = "Verify failed: " + (err.detail || `HTTP ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    if (!panel) return;
+    if (data.verified) {
+      const ts = data.timestamp ? new Date(data.timestamp * 1000).toLocaleString() : "";
+      const safeUrl = /^https:\/\//.test(data.etherscan_url ?? "") ? data.etherscan_url : "#";
+      panel.innerHTML =
+        `<span style="color:#34d399">&#10003; Chain verified</span>` +
+        ` — digest matches on-chain record${ts ? " @ " + escapeHtml(ts) : ""}. ` +
+        `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" style="color:#818cf8">Etherscan</a>`;
+    } else {
+      panel.innerHTML =
+        `<span style="color:#ef4444">&#10007; Mismatch</span>` +
+        ` — on-chain: <code>${escapeHtml((data.on_chain_digest || "").slice(0, 18))}…</code>` +
+        ` local: <code>${escapeHtml((data.local_digest || "").slice(0, 18))}…</code>`;
+    }
+  } catch (err) {
+    if (panel) panel.textContent = "Verify error: " + err.message;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket — real-time delivery + cover-traffic heartbeats
+// ---------------------------------------------------------------------------
+
+function connectWebSocket() {
+  if (ws && ws.readyState <= WebSocket.OPEN) return;
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.addEventListener("open", () => {
+    stopInboxPoller(); // WebSocket handles delivery; polling resumes if socket closes
+  });
+
+  ws.addEventListener("message", (event) => {
+    try {
+      const frame = JSON.parse(event.data);
+      if (frame.type === "new_message") fetchInbox();
+      // heartbeat frames are silently discarded
+    } catch {
+      // non-JSON frame — ignore
+    }
+  });
+
+  ws.addEventListener("close", () => {
+    ws = null;
+    startInboxPoller(); // fall back to polling until reconnect
+    if (currentUser) wsReconnectTimer = setTimeout(connectWebSocket, 5000);
+  });
+
+  ws.addEventListener("error", () => {
+    // error is always followed by close — handled above
+  });
+}
+
+function disconnectWebSocket() {
+  clearTimeout(wsReconnectTimer);
+  if (ws) { ws.close(); ws = null; }
+}
+
+// ---------------------------------------------------------------------------
+// SPK rotation + OPK replenishment
+// ---------------------------------------------------------------------------
+
+const OPK_LOW_WATERMARK = 5;
+const OPK_BATCH_SIZE    = 10;
+const SPK_ROTATION_MS   = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+async function maybeReplenishPrekeys() {
+  if (!wrappingKey) return; // pre-wrapping session — migration notice handles this
+
+  const { opk_count } = await apiFetch("/auth/prekeys/count");
+  const spkCreatedAt  = await loadPrivateKey("spk_created_at");
+  const spkAgeMs      = spkCreatedAt != null ? Date.now() - spkCreatedAt : Infinity;
+
+  if (spkAgeMs > SPK_ROTATION_MS) {
+    await _rotateSPK();
+  } else if (opk_count < OPK_LOW_WATERMARK) {
+    await _topUpOPKs();
+  }
+}
+
+async function _rotateSPK() {
+  const spkKeypair  = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+  const spkPubB64   = await exportPublicKey(spkKeypair.publicKey);
+  const spkPubBytes = Uint8Array.from(atob(spkPubB64), c => c.charCodeAt(0));
+  const spkSigB64   = await signMessage(spkPubBytes.buffer, mySigningKey);
+  const opks        = await generateOPKs(OPK_BATCH_SIZE, wrappingKey);
+  const keyId       = Math.floor(Date.now() / 1000);
+
+  await storePrivateKey("spk",            await wrapPrivateKey(spkKeypair.privateKey, wrappingKey));
+  await storePrivateKey("spk_pub_b64",    spkPubB64);
+  await storePrivateKey("spk_created_at", Date.now());
+
+  await apiFetch("/auth/prekeys", {
+    method: "POST",
+    body: JSON.stringify({
+      signed_prekey:    { key_id: keyId, public_key: spkPubB64, signature: spkSigB64 },
+      one_time_prekeys: await Promise.all(
+        opks.map(async (kp, i) => ({ key_id: keyId * 100 + i, public_key: await exportPublicKey(kp.publicKey) })),
+      ),
+    }),
+  });
+}
+
+async function _topUpOPKs() {
+  const opks  = await generateOPKs(OPK_BATCH_SIZE, wrappingKey);
+  const keyId = Math.floor(Date.now() / 1000);
+
+  await apiFetch("/auth/opks", {
+    method: "POST",
+    body: JSON.stringify({
+      one_time_prekeys: await Promise.all(
+        opks.map(async (kp, i) => ({ key_id: keyId * 100 + i, public_key: await exportPublicKey(kp.publicKey) })),
+      ),
+    }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Inbox poller
 // ---------------------------------------------------------------------------
 
 function startInboxPoller() {
@@ -402,33 +818,60 @@ function stopInboxPoller() {
 function showAuth() {
   document.getElementById("auth-section").style.display = "flex";
   document.getElementById("app-section").style.display  = "none";
+
+  // Clear credentials so they are never visible after logout or back-navigation.
+  ["login-username", "login-password", "reg-username", "reg-email", "reg-password"]
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
+
+  // Clear the contact sidebar and chat area so a subsequent login starts clean.
+  const contactList = document.getElementById("contact-list");
+  if (contactList) contactList.innerHTML = "";
+  const messageList = document.getElementById("message-list");
+  if (messageList) messageList.innerHTML = "";
+  const chatRecipient = document.getElementById("chat-recipient");
+  if (chatRecipient) chatRecipient.textContent = "Select a conversation";
+  const chatFp = document.getElementById("chat-fp");
+  if (chatFp) chatFp.textContent = "";
+
+  // Always land on the login form (no-op when register-form doesn't exist on this page).
+  const loginForm    = document.getElementById("login-form");
+  const registerForm = document.getElementById("register-form");
+  if (loginForm)    loginForm.style.display    = "flex";
+  if (registerForm) registerForm.style.display = "none";
 }
 
 function showApp() {
   document.getElementById("auth-section").style.display = "none";
   document.getElementById("app-section").style.display  = "flex";
+  // Populate sidebar username display (from Alphra design)
   const display = document.getElementById("my-username-display");
   if (display && currentUser) display.textContent = currentUser.username;
+  // Open WebSocket for real-time delivery
+  connectWebSocket();
 }
 
-function renderMessage(senderUsername, plaintext, meta = {}) {
-  // Determine which conversation this belongs to.
-  const partner = senderUsername === currentUser?.username ? activeRecipient : senderUsername;
-  if (!partner) return;
+// ---------------------------------------------------------------------------
+// Bubble rendering
+// ---------------------------------------------------------------------------
 
-  // Cache in RAM so switching conversations re-renders from memory.
-  if (!decryptedCache.has(partner)) decryptedCache.set(partner, []);
-  decryptedCache.get(partner).push({ sender: senderUsername, plaintext, meta });
+// Format a millisecond timestamp for display in a message bubble.
+// Today → "2:34 PM"; this year → "Jan 15 · 2:34 PM"; older → "Jan 15 2024 · 2:34 PM".
+function formatTimestamp(ms) {
+  if (!ms) return "";
+  const d       = new Date(ms);
+  const now     = new Date();
+  const timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-  // Only render immediately if this is the currently open conversation.
-  if (partner !== activeRecipient) return;
+  const sameDay = d.getDate()     === now.getDate()  &&
+                  d.getMonth()    === now.getMonth()  &&
+                  d.getFullYear() === now.getFullYear();
+  if (sameDay) return timeStr;
 
-  const list = document.getElementById("message-list");
-  if (!list) return;
-  _appendBubble(list, senderUsername, plaintext, meta);
+  const dateStr = d.getFullYear() === now.getFullYear()
+    ? d.toLocaleDateString([], { month: "short", day: "numeric" })
+    : d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 
-  const wrapper = document.getElementById("messages-wrapper");
-  if (wrapper) wrapper.scrollTop = wrapper.scrollHeight;
+  return `${dateStr} · ${timeStr}`;
 }
 
 function _appendBubble(list, senderUsername, plaintext, meta = {}) {
@@ -437,13 +880,15 @@ function _appendBubble(list, senderUsername, plaintext, meta = {}) {
   bubble.className = `message-bubble ${isMine ? "sent" : "received"}`;
   if (meta.id) bubble.dataset.messageId = meta.id;
 
-  const timeStr = meta.timestamp
-    ? new Date(meta.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : "";
+  // Accept either milliseconds (from messageCache) or ISO strings (from API).
+  const tsMs    = typeof meta.timestamp === "number"
+    ? meta.timestamp
+    : (meta.timestamp ? Date.parse(meta.timestamp) : 0);
+  const timeStr = formatTimestamp(tsMs);
 
   const badgeHtml = meta.blockchain_confirmed
     ? '<span class="badge-verified" title="Blockchain verified">✓</span>'
-    : (meta.timestamp ? '<span class="badge-pending" title="Pending blockchain confirmation">⏳</span>' : "");
+    : (tsMs ? '<span class="badge-pending" title="Pending blockchain confirmation">⏳</span>' : "");
 
   bubble.innerHTML =
     `<div class="bubble-text">${escapeHtml(plaintext)}</div>` +
@@ -452,44 +897,37 @@ function _appendBubble(list, senderUsername, plaintext, meta = {}) {
   list.appendChild(bubble);
 }
 
-function _prependBubble(list, senderUsername, plaintext, meta = {}) {
-  const isMine = senderUsername === currentUser?.username;
-  const bubble = document.createElement("div");
-  bubble.className = `message-bubble ${isMine ? "sent" : "received"}`;
-  if (meta.id) bubble.dataset.messageId = meta.id;
-
-  const timeStr = meta.timestamp
-    ? new Date(meta.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : "";
-
-  const badgeHtml = meta.blockchain_confirmed
-    ? '<span class="badge-verified" title="Blockchain verified">✓</span>'
-    : (meta.timestamp ? '<span class="badge-pending" title="Pending blockchain confirmation">⏳</span>' : "");
-
-  bubble.innerHTML =
-    `<div class="bubble-text">${escapeHtml(plaintext)}</div>` +
-    `<div class="bubble-meta">${escapeHtml(timeStr)}${badgeHtml}</div>`;
-
-  list.insertBefore(bubble, list.firstChild);
-}
-
 function escapeHtml(str) {
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  return String(str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
+
+// ---------------------------------------------------------------------------
+// Event listeners
+// ---------------------------------------------------------------------------
 
 function attachEventListeners() {
-  document.getElementById("btn-login").addEventListener("click", login);
-  document.getElementById("btn-logout").addEventListener("click", logout);
-  document.getElementById("btn-send").addEventListener("click", sendMessage);
+  document.getElementById("btn-login")?.addEventListener("click", login);
+  document.getElementById("btn-logout")?.addEventListener("click", logout);
+  document.getElementById("btn-send")?.addEventListener("click", sendMessage);
 
-  document.getElementById("btn-add-contact").addEventListener("click", async () => {
+  // Clear inline field errors as the user types.
+  [
+    ["login-username", "login-username-error"],
+    ["login-password", "login-password-error"],
+  ].forEach(([inputId, errorId]) => {
+    document.getElementById(inputId)?.addEventListener("input", () =>
+      setFieldError(inputId, errorId, "")
+    );
+  });
+
+  document.getElementById("btn-add-contact")?.addEventListener("click", async () => {
     const input    = document.getElementById("new-contact");
     const username = input.value.trim();
     if (!username) return;
     try {
       await fetchContactKeybundle(username);
-      addContactToSidebar(username);
       input.value = "";
     } catch (err) {
       alert(err.message);
@@ -497,142 +935,106 @@ function attachEventListeners() {
   });
 
   // Allow adding a friend by pressing Enter in the new-contact field.
-  document.getElementById("new-contact").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); document.getElementById("btn-add-contact").click(); }
+  document.getElementById("new-contact")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); document.getElementById("btn-add-contact")?.click(); }
   });
 
   // Client-side search: show/hide contact rows as user types.
-  document.getElementById("search-conversations").addEventListener("input", (e) => {
+  document.getElementById("search-conversations")?.addEventListener("input", (e) => {
     const q = e.target.value.trim().toLowerCase();
-    document.getElementById("contact-list").querySelectorAll("li").forEach(li => {
+    document.getElementById("contact-list")?.querySelectorAll("li").forEach(li => {
       li.style.display = (!q || li.dataset.username.toLowerCase().includes(q)) ? "" : "none";
     });
   });
 
-  // Load older messages button.
-  document.getElementById("btn-load-older").addEventListener("click", loadOlderMessages);
+  // Inline blockchain verification.
+  document.getElementById("btn-verify-chain")?.addEventListener("click", () => {
+    if (activeRecipient) verifyBlockchain(activeRecipient);
+  });
+
+  // Load older messages — increases the render window by PAGE_SIZE and scrolls
+  // to the top so the user sees the newly revealed messages.
+  document.getElementById("btn-load-older")?.addEventListener("click", () => {
+    if (!activeRecipient) return;
+    renderLimits.set(activeRecipient, (renderLimits.get(activeRecipient) ?? PAGE_SIZE) + PAGE_SIZE);
+    renderThread(activeRecipient);
+    const msgList = document.getElementById("message-list");
+    if (msgList) msgList.scrollTop = 0;
+  });
 
   // Mobile: hamburger toggle for sidebar.
-  const menuToggle = document.getElementById("menu-toggle");
-  if (menuToggle) {
-    menuToggle.addEventListener("click", () => {
-      document.getElementById("sidebar").classList.toggle("open");
-    });
-  }
+  document.getElementById("menu-toggle")?.addEventListener("click", () => {
+    document.getElementById("sidebar")?.classList.toggle("open");
+  });
 
-  // Allow Send on Enter (Shift+Enter for newline).
-  document.getElementById("plaintext-input").addEventListener("keydown", (e) => {
+  // Send on Enter (Shift+Enter for newline).
+  document.getElementById("plaintext-input")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
 }
 
-function addContactToSidebar(username) {
+// ---------------------------------------------------------------------------
+// Contact sidebar
+// ---------------------------------------------------------------------------
+
+function addContactToSidebar(username, fingerprintHex, isFirstContact) {
   const list = document.getElementById("contact-list");
   if (!list) return;
-  // Avoid duplicates.
-  if (list.querySelector(`[data-username="${CSS.escape(username)}"]`)) return;
+
+  // Update fingerprint badge if contact already exists.
+  const existing = list.querySelector(`[data-username="${CSS.escape(username)}"]`);
+  if (existing) {
+    return; // already shown — fingerprint stored, no UI update needed
+  }
+
   const li = document.createElement("li");
   li.dataset.username = username;
-  li.textContent      = username;
-  li.addEventListener("click", () => _openConversation(username));
+  li.textContent      = username; // clean name only, fingerprint shown in header
+
+  li.addEventListener("click", async () => {
+    // Update active state in sidebar.
+    list.querySelectorAll("li").forEach(el => el.classList.remove("active"));
+    li.classList.add("active");
+
+    activeRecipient = username;
+    document.getElementById("chat-recipient").textContent = username;
+
+    // Hide previous verify result.
+    const verifyPanel = document.getElementById("verify-result-panel");
+    if (verifyPanel) verifyPanel.style.display = "none";
+
+    // Show key fingerprint in header and reveal the inline verify button.
+    const chatFp = document.getElementById("chat-fp");
+    if (chatFp) chatFp.textContent = fingerprintHex ? _formatFingerprint(fingerprintHex) : "";
+
+    const verifyBtn = document.getElementById("btn-verify-chain");
+    if (verifyBtn) {
+      const bundle = contacts.get(username);
+      verifyBtn.style.display = bundle?.user_id ? "inline-flex" : "none";
+    }
+
+    // Load and render history from encrypted IndexedDB store.
+    renderLimits.set(username, PAGE_SIZE);
+    if (storageKey && currentUser) {
+      try {
+        const convId  = localConvId(currentUser.username, username);
+        const history = await loadMessages(convId, storageKey);
+        messageCache.set(convId, history);
+      } catch (err) {
+        console.warn("Failed to load message history:", err);
+      }
+    }
+    renderThread(username);
+
+    // On mobile, close sidebar after selecting a conversation.
+    document.getElementById("sidebar")?.classList.remove("open");
+  });
+
   list.appendChild(li);
 }
 
-function _openConversation(username) {
-  // Update active state in sidebar.
-  const list = document.getElementById("contact-list");
-  if (list) {
-    list.querySelectorAll("li").forEach(el => el.classList.remove("active"));
-    const target = list.querySelector(`[data-username="${CSS.escape(username)}"]`);
-    if (target) target.classList.add("active");
-  }
-
-  activeRecipient = username;
-  oldestLoadedId  = null;
-
-  document.getElementById("chat-recipient").textContent = username;
-  document.getElementById("message-list").innerHTML = "";
-
-  // Re-render any messages already decrypted this session.
-  const cached = decryptedCache.get(username) || [];
-  const msgList = document.getElementById("message-list");
-  for (const entry of cached) {
-    _appendBubble(msgList, entry.sender, entry.plaintext, entry.meta);
-  }
-
-  // Show the "Load older messages" button once a conversation is open.
-  const olderBtn = document.getElementById("btn-load-older");
-  if (olderBtn) olderBtn.style.display = "flex";
-
-  const wrapper = document.getElementById("messages-wrapper");
-  if (wrapper) wrapper.scrollTop = wrapper.scrollHeight;
-
-  // On mobile, close sidebar after selecting a conversation.
-  document.getElementById("sidebar")?.classList.remove("open");
-}
-
-// ---------------------------------------------------------------------------
-// Load older messages (cursor-based pagination)
-// ---------------------------------------------------------------------------
-
-async function loadOlderMessages() {
-  if (!activeRecipient) return;
-  try {
-    const url = `/messages/inbox?with_user=${encodeURIComponent(activeRecipient)}&limit=10` +
-      (oldestLoadedId ? `&before=${encodeURIComponent(oldestLoadedId)}` : "");
-
-    const messages = await apiFetch(url);
-    if (messages.length === 0) {
-      const btn = document.getElementById("btn-load-older");
-      if (btn) btn.style.display = "none";
-      return;
-    }
-
-    const list = document.getElementById("message-list");
-    // Oldest first — API returns newest-first, so reverse before prepending.
-    for (const msg of [...messages].reverse()) {
-      if (seenMessageIds.has(msg.id)) continue;
-      seenMessageIds.add(msg.id);
-
-      const sender = msg.sender_username;
-      try {
-        let session = sessions.get(sender) ?? await loadSession(sender);
-
-        if (!session && msg.x3dh_header) {
-          const { SK } = await x3dhReceive(myPrivateKey, msg.x3dh_header);
-          session = await initSessionAsReceiver(SK, msg.x3dh_header.ik_a, myPublicKeyB64);
-        }
-
-        if (!session) continue;
-
-        const plaintext = await ratchetDecrypt(
-          session,
-          { ciphertext: msg.ciphertext, nonce: msg.nonce, ratchet_pub: msg.ratchet_pub, pn: msg.pn, n: msg.n },
-          session.ik_a,
-          session.ik_b,
-        );
-
-        sessions.set(sender, session);
-        await saveSession(sender, session);
-
-        const meta = {
-          timestamp:            msg.created_at,
-          blockchain_confirmed: msg.blockchain_confirmed,
-          id:                   msg.id,
-        };
-        _prependBubble(list, sender, plaintext, meta);
-
-        if (!decryptedCache.has(sender)) decryptedCache.set(sender, []);
-        decryptedCache.get(sender).unshift({ sender, plaintext, meta });
-
-        oldestLoadedId = msg.id;
-      } catch (err) {
-        console.error("loadOlderMessages: decrypt failed", msg.id, err);
-      }
-    }
-  } catch (err) {
-    console.error("loadOlderMessages failed:", err);
-  }
+function _formatFingerprint(hex) {
+  return hex.match(/.{1,8}/g).join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -653,16 +1055,13 @@ async function apiFetch(path, options = {}) {
     if (csrf) headers["X-CSRF-Token"] = csrf;
   }
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers,
-    credentials: "include",
-  });
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: "include" });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || `HTTP ${res.status}`);
   }
 
+  if (res.status === 204) return null;
   return res.json();
 }

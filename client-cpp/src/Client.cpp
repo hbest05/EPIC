@@ -247,6 +247,26 @@ QString Client::login(const QString& username, const QString& password)
     return {};
 }
 
+QString Client::changePassword(const QString& currentPassword, const QString& newPassword)
+{
+    QJsonObject body;
+    body.insert(QStringLiteral("current_password"), currentPassword);
+    body.insert(QStringLiteral("new_password"),     newPassword);
+
+    const QByteArray resp = httpRequest(QStringLiteral("POST"),
+                                        QStringLiteral("/api/auth/change-password"),
+                                        QJsonDocument(body).toJson(QJsonDocument::Compact));
+
+    if (m_lastStatus != 200) {
+        if (!m_lastError.isEmpty()) return m_lastError;
+        const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+        return obj.value(QStringLiteral("detail")).toString(
+            QStringLiteral("password change failed (HTTP %1)").arg(m_lastStatus));
+    }
+
+    return {};
+}
+
 void Client::logout()
 {
     (void)httpRequest(QStringLiteral("POST"),

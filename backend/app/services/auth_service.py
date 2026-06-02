@@ -10,11 +10,11 @@ on login; every state-changing request must echo it in the X-CSRF-Token header.
 
 import hmac
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import jwt  # PyJWT — replaces python-jose (PYSEC-2024-232, PYSEC-2024-233)
 from fastapi import Depends, HTTPException, Request, status
-from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +49,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(subject: str, expires_delta: Optional[timedelta] = None) -> str:
     """Create a signed JWT with `sub` set to the user's UUID string."""
-    expire = datetime.utcnow() + (
+    expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.jwt_access_token_expire_minutes)
     )
     return jwt.encode(
@@ -107,7 +107,7 @@ async def get_current_user(
         user_id: str = payload.get("sub")
         if not user_id:
             raise _credentials_exception
-    except JWTError:
+    except jwt.PyJWTError:
         raise _credentials_exception
 
     result = await db.execute(select(User).where(User.id == user_id))
@@ -116,3 +116,5 @@ async def get_current_user(
         raise _credentials_exception
 
     return user
+
+

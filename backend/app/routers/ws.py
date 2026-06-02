@@ -1,18 +1,27 @@
 """
-WebSocket router — real-time inbound message delivery.
+WebSocket router — real-time inbound message delivery + cover traffic heartbeats.
 
-A client opens wss://<host>/ws after login. The handshake is authenticated the
-same way as the REST API: the httpOnly `access_token` JWT cookie (also accepted
-as a `?token=` query param fallback for clients that can't attach the cookie to
-the upgrade request). On success the socket is registered in the in-process
-ConnectionManager; the /messages/send handler then pushes a `new_message`
-notification to the recipient's socket if they're connected.
+A client opens wss://<host>/ws after login. The handshake is authenticated via
+the httpOnly `access_token` JWT cookie sent automatically by the browser on
+same-origin WebSocket upgrades. On success the socket is registered in the
+in-process ConnectionManager; the /messages/send handler then pushes a
+`new_message` notification to the recipient's socket if they're connected.
+
+Cover traffic: after connecting, a background task (_heartbeat_task) sends a
+256-byte random payload to the client at uniformly random [3, 10] second
+intervals. The frames are indistinguishable in size from padded real-message
+frames, reducing timing correlation between message send and receive events.
+Clients silently discard frames with type != "new_message".
 
 We never read inbound frames as commands — the client only sends keepalives.
 The receive loop exists solely to observe the disconnect.
 """
 
+import asyncio
+import base64
 import logging
+import os
+import random
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
@@ -30,12 +39,12 @@ router = APIRouter()
 
 
 async def _authenticate(websocket: WebSocket) -> User | None:
-    """Resolve the access_token (cookie or ?token= query param) to a live User.
+    """Resolve the access_token cookie to a live User.
 
     Returns None on any failure — missing token, bad signature, unknown or
     inactive user — so the caller can reject the handshake.
     """
-    token = websocket.cookies.get("access_token") or websocket.query_params.get("token")
+    token = websocket.cookies.get("access_token")
     if not token:
         return None
 
@@ -65,6 +74,23 @@ async def _authenticate(websocket: WebSocket) -> User | None:
     return user
 
 
+async def _heartbeat_task(websocket: WebSocket) -> None:
+    """Send cover-traffic frames at uniformly random 3–10 second intervals.
+
+    Each frame carries 256 bytes of CSPRNG output encoded as base64 (344 chars).
+    This matches the padded size of real message payloads, making heartbeat
+    frames indistinguishable from real messages at the TLS record layer.
+    The frame type field is "heartbeat" so clients can silently discard it.
+    """
+    try:
+        while True:
+            await asyncio.sleep(random.uniform(3.0, 10.0))
+            payload = base64.b64encode(os.urandom(256)).decode()
+            await websocket.send_json({"type": "heartbeat", "payload": payload})
+    except Exception:
+        pass
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -78,6 +104,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     user_id = str(user.id)
     await manager.connect(user_id, websocket)
+    heartbeat = asyncio.create_task(_heartbeat_task(websocket))
     try:
         # Block on inbound frames purely to keep the connection open and detect
         # the client going away. Any received text is ignored.
@@ -88,4 +115,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except Exception as exc:
         logger.debug("ws receive loop ended user=%s: %s", user_id, exc)
     finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
         await manager.disconnect(user_id, websocket)
