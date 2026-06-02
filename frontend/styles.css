@@ -886,3 +886,196 @@ input.invalid {
 #chat-header-row { display: flex; align-items: center; justify-content: space-between; }
 #chat-fp { font-size: 0.68rem; font-family: monospace; }
 
+/* ============================================================
+   MESSAGE BUBBLE ACTIONS — appear on hover
+   ============================================================ */
+
+.bubble-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.message-bubble:hover .bubble-actions,
+.message-bubble:focus-within .bubble-actions {
+  opacity: 1;
+}
+
+.action-btn {
+  background: rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+  color: rgba(0, 0, 0, 0.55);
+  font-size: 11px;
+  padding: 2px 7px;
+  cursor: pointer;
+  font-family: var(--font-serif);
+  line-height: 1.6;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.action-btn:hover {
+  background: rgba(0, 0, 0, 0.2);
+  color: rgba(0, 0, 0, 0.8);
+}
+
+.action-btn-danger:hover {
+  background: rgba(180, 30, 30, 0.18);
+  border-color: rgba(180, 30, 30, 0.3);
+  color: #9b1c1c;
+}
+
+/* ============================================================
+   MODALS — confirm dialog + forward recipient picker
+   ============================================================ */
+
+.msg-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.msg-modal-box {
+  background: #160f24;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  padding: 28px 32px 24px;
+  max-width: 420px;
+  width: 90%;
+  font-family: var(--font-serif);
+  color: #e2e8f0;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+.msg-modal-title {
+  font-size: 18px;
+  font-weight: normal;
+  color: #fff;
+  margin-bottom: 16px;
+}
+
+.msg-modal-text {
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.82);
+  line-height: 1.55;
+  margin-bottom: 8px;
+}
+
+.msg-modal-warning {
+  font-size: 13px;
+  color: rgba(250, 200, 80, 0.95);
+  background: rgba(250, 200, 80, 0.08);
+  border: 1px solid rgba(250, 200, 80, 0.2);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-top: 10px;
+  margin-bottom: 4px;
+  line-height: 1.5;
+}
+
+.msg-modal-btns {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 22px;
+}
+
+.msg-modal-btn-cancel {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50px;
+  color: rgba(255, 255, 255, 0.55);
+  font-family: var(--font-serif);
+  font-size: 14px;
+  padding: 8px 20px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.msg-modal-btn-cancel:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.msg-modal-btn-confirm {
+  background: rgba(220, 215, 230, 0.92);
+  border: none;
+  border-radius: 50px;
+  color: #111;
+  font-family: var(--font-serif);
+  font-size: 14px;
+  padding: 8px 20px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.msg-modal-btn-confirm:hover {
+  background: #fff;
+}
+
+.msg-modal-btn-confirm.danger {
+  background: rgba(200, 40, 40, 0.85);
+  color: #fff;
+}
+
+.msg-modal-btn-confirm.danger:hover {
+  background: rgba(200, 40, 40, 1);
+}
+
+/* Forward modal input */
+.fwd-modal-status {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.55);
+  min-height: 1.4em;
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+
+.fwd-modal-status.error {
+  color: #ef4444;
+}
+
+.fwd-recipient-input {
+  width: 100%;
+  background: rgba(180, 170, 195, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50px;
+  color: #fff;
+  padding: 10px 18px;
+  font-family: var(--font-serif);
+  font-size: 15px;
+  outline: none;
+  transition: box-shadow 0.2s;
+}
+
+.fwd-recipient-input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.fwd-recipient-input:focus {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
+}
+
+/* Revoked message state */
+.message-bubble.revoked .bubble-text {
+  color: rgba(0, 0, 0, 0.4);
+  font-style: italic;
+}
+
+.message-bubble.revoked .bubble-meta::before {
+  content: "access revoked · ";
+  color: rgba(0, 0, 0, 0.35);
+  font-size: 10px;
+}
+

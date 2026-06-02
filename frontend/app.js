@@ -535,6 +535,61 @@ function renderThread(username) {
 // Messaging
 // ---------------------------------------------------------------------------
 
+/**
+ * Core send logic shared by sendMessage() and forwardMessage().
+ * Encrypts `plaintext` under the Double Ratchet session with `recipient`,
+ * POSTs to /messages/send, and persists to the in-memory + IndexedDB cache.
+ * Returns the server-assigned message UUID, or throws on failure.
+ *
+ * @param {string} recipient - Target username
+ * @param {string} plaintext - Plaintext to send (never leaves the browser unencrypted)
+ * @returns {Promise<string>} Server-assigned message UUID
+ */
+async function _sendText(recipient, plaintext) {
+  let session = sessions.get(recipient) ?? await loadSession(recipient, storageKey);
+
+  if (!session) {
+    const bundle = contacts.get(recipient) ?? await fetchContactKeybundle(recipient);
+    const { SK, ephemeralPubB64, usedOPKPub } = await x3dhSend(myPrivateKey, bundle);
+    session = await initSessionAsSender(SK, bundle.spk.public_key, myPublicKeyB64, bundle.ik_x25519);
+    session.x3dh_ephemeral_pub = ephemeralPubB64;
+    session.x3dh_used_opk_pub  = usedOPKPub;
+  }
+
+  const encrypted = await ratchetEncrypt(session, plaintext);
+
+  let x3dhHeader = null;
+  if (!session.x3dh_header_sent) {
+    x3dhHeader = {
+      ik_a:         myPublicKeyB64,
+      ek_a:         session.x3dh_ephemeral_pub,
+      used_opk_pub: session.x3dh_used_opk_pub,
+    };
+    session.x3dh_header_sent = true;
+  }
+
+  sessions.set(recipient, session);
+  await saveSession(recipient, session, storageKey);
+
+  // Capture server UUID so delete/revoke have a stable handle.
+  const { id: msgId } = await apiFetch("/messages/send", {
+    method: "POST",
+    body: JSON.stringify({
+      recipient_username: recipient,
+      ciphertext:  encrypted.ciphertext_b64,
+      nonce:       encrypted.nonce_b64,
+      ratchet_pub: encrypted.ratchet_pub_b64,
+      pn:          encrypted.pn,
+      n:           encrypted.n,
+      x3dh_header: x3dhHeader,
+    }),
+  });
+
+  const sentAt = Date.now();
+  await persistMessage(currentUser.username, recipient, plaintext, msgId, sentAt, false);
+  return msgId;
+}
+
 async function sendMessage() {
   if (!activeRecipient) return;
   const input     = document.getElementById("plaintext-input");
@@ -542,48 +597,7 @@ async function sendMessage() {
   if (!plaintext) return;
 
   try {
-    let session = sessions.get(activeRecipient) ?? await loadSession(activeRecipient, storageKey);
-
-    if (!session) {
-      const bundle = contacts.get(activeRecipient) ?? await fetchContactKeybundle(activeRecipient);
-      const { SK, ephemeralPubB64, usedOPKPub } = await x3dhSend(myPrivateKey, bundle);
-
-      session = await initSessionAsSender(SK, bundle.spk.public_key, myPublicKeyB64, bundle.ik_x25519);
-      session.x3dh_ephemeral_pub = ephemeralPubB64;
-      session.x3dh_used_opk_pub  = usedOPKPub;
-    }
-
-    const encrypted = await ratchetEncrypt(session, plaintext);
-
-    let x3dhHeader = null;
-    if (!session.x3dh_header_sent) {
-      x3dhHeader = {
-        ik_a:         myPublicKeyB64,
-        ek_a:         session.x3dh_ephemeral_pub,
-        used_opk_pub: session.x3dh_used_opk_pub,
-      };
-      session.x3dh_header_sent = true;
-    }
-
-    sessions.set(activeRecipient, session);
-    await saveSession(activeRecipient, session, storageKey);
-
-    await apiFetch("/messages/send", {
-      method: "POST",
-      body: JSON.stringify({
-        recipient_username: activeRecipient,
-        ciphertext:  encrypted.ciphertext_b64,
-        nonce:       encrypted.nonce_b64,
-        ratchet_pub: encrypted.ratchet_pub_b64,
-        pn:          encrypted.pn,
-        n:           encrypted.n,
-        x3dh_header: x3dhHeader,
-      }),
-    });
-
-    const sentAt = Date.now();
-    const sentId = "sent-" + sentAt + "-" + Math.random().toString(36).slice(2);
-    await persistMessage(currentUser.username, activeRecipient, plaintext, sentId, sentAt, false);
+    await _sendText(activeRecipient, plaintext);
     renderThread(activeRecipient);
     input.value = "";
   } catch (err) {
@@ -720,7 +734,13 @@ function connectWebSocket() {
   ws.addEventListener("message", (event) => {
     try {
       const frame = JSON.parse(event.data);
-      if (frame.type === "new_message") fetchInbox();
+      if (frame.type === "new_message") {
+        fetchInbox();
+      } else if (frame.type === "message_deleted") {
+        // Mirror C++ MainWindow::onWsTextMessage: remove the message from
+        // the local plaintext cache and re-render the active thread.
+        _removeMessageFromCache(String(frame.message_id ?? ""));
+      }
       // heartbeat frames are silently discarded
     } catch {
       // non-JSON frame — ignore
@@ -936,9 +956,79 @@ function _appendBubble(list, senderUsername, plaintext, meta = {}) {
     : (meta.timestamp ? Date.parse(meta.timestamp) : 0);
   const timeStr = formatTimestamp(tsMs);
 
-  bubble.innerHTML =
-    `<div class="bubble-text">${escapeHtml(plaintext)}</div>` +
-    `<div class="bubble-meta">${escapeHtml(timeStr)}</div>`;
+  // Use textContent (not innerHTML) for all user-supplied strings to prevent XSS.
+  const textEl = document.createElement("div");
+  textEl.className = "bubble-text";
+  textEl.textContent = plaintext;
+
+  const metaEl = document.createElement("div");
+  metaEl.className = "bubble-meta";
+  metaEl.textContent = timeStr;
+
+  bubble.appendChild(textEl);
+  bubble.appendChild(metaEl);
+
+  // Action buttons — only rendered when we have a stable server ID.
+  // Mirrors C++ MainWindow context menu: forward + download available on all
+  // messages; delete + revoke only on sent messages.
+  // Revoke is additionally gated to forwarded messages (↪ prefix), matching
+  // the C++ client check: isForwarded = plaintext.startsWith(QChar(0x21AA)).
+  if (meta.id) {
+    const actionsEl = document.createElement("div");
+    actionsEl.className = "bubble-actions";
+
+    // Forward — all messages (mirroring C++ "Forward message…" context action)
+    const fwdBtn = document.createElement("button");
+    fwdBtn.className = "action-btn";
+    fwdBtn.title     = "Forward message";
+    fwdBtn.textContent = "↪ fwd";
+    fwdBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      forwardMessage(senderUsername, plaintext);
+    });
+    actionsEl.appendChild(fwdBtn);
+
+    // Download — all messages (reads from local plaintext cache, no server call)
+    const dlBtn = document.createElement("button");
+    dlBtn.className  = "action-btn";
+    dlBtn.title      = "Download message";
+    dlBtn.textContent = "↓ save";
+    dlBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      downloadMessage(senderUsername, plaintext, meta.id, tsMs);
+    });
+    actionsEl.appendChild(dlBtn);
+
+    if (isMine) {
+      // Revoke — only on sent messages that were forwarded (start with ↪ U+21AA),
+      // matching the C++ isForwarded check. Revocation hides the message from
+      // the recipient but does NOT destroy already-decrypted copies.
+      if (plaintext.startsWith("↪")) {
+        const revokeBtn = document.createElement("button");
+        revokeBtn.className  = "action-btn action-btn-danger";
+        revokeBtn.title      = "Revoke access";
+        revokeBtn.textContent = "⊗ revoke";
+        revokeBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          revokeMessage(meta.id, bubble);
+        });
+        actionsEl.appendChild(revokeBtn);
+      }
+
+      // Delete — all sent messages
+      const delBtn = document.createElement("button");
+      delBtn.className  = "action-btn action-btn-danger";
+      delBtn.title      = "Delete message";
+      delBtn.textContent = "✕ del";
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteMessage(meta.id, meta.blockchain_confirmed ?? false, bubble);
+      });
+      actionsEl.appendChild(delBtn);
+    }
+
+    bubble.appendChild(actionsEl);
+  }
 
   list.appendChild(bubble);
 }
@@ -947,6 +1037,312 @@ function escapeHtml(str) {
   return String(str)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// ---------------------------------------------------------------------------
+// Message cache helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Remove a message from every conversation in the in-memory cache by server ID.
+ * Re-renders the active thread if the message was found there.
+ * Mirrors C++ MessageStore::removeMessageById + renderActiveThread on the
+ * message_deleted WebSocket event.
+ *
+ * @param {string} msgId - Server message UUID to remove
+ */
+function _removeMessageFromCache(msgId) {
+  if (!msgId) return;
+  for (const [convId, msgs] of messageCache.entries()) {
+    const idx = msgs.findIndex(m => m.id === msgId);
+    if (idx === -1) continue;
+    msgs.splice(idx, 1);
+    // Re-render if the deleted message belonged to the active conversation.
+    const parts     = convId.split(":");
+    const otherUser = parts[0] === currentUser?.username ? parts[1] : parts[0];
+    if (otherUser === activeRecipient) renderThread(activeRecipient);
+    break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Modals
+// ---------------------------------------------------------------------------
+
+/**
+ * Show a blocking confirm/cancel modal.
+ * Returns a Promise that resolves true (confirm) or false (cancel/dismiss).
+ *
+ * @param {string}  text          - Body text to display
+ * @param {string|null} warningText - Optional amber notice (e.g. blockchain caveat)
+ * @param {string}  confirmLabel  - Label for the confirm button
+ * @param {boolean} isDanger      - If true, styles the confirm button in red
+ * @returns {Promise<boolean>}
+ */
+function showConfirmModal(text, warningText = null, confirmLabel = "Confirm", isDanger = false) {
+  return new Promise((resolve) => {
+    const overlay    = document.getElementById("msg-modal-overlay");
+    const textEl     = document.getElementById("msg-modal-text");
+    const warnEl     = document.getElementById("msg-modal-warning");
+    const confirmBtn = document.getElementById("msg-modal-confirm");
+    const cancelBtn  = document.getElementById("msg-modal-cancel");
+
+    textEl.textContent = text;
+    if (warningText) {
+      warnEl.textContent  = warningText;
+      warnEl.style.display = "block";
+    } else {
+      warnEl.style.display = "none";
+    }
+    confirmBtn.textContent = confirmLabel;
+    confirmBtn.classList.toggle("danger", isDanger);
+    overlay.style.display = "flex";
+
+    const cleanup = () => {
+      overlay.style.display = "none";
+      confirmBtn.removeEventListener("click", onConfirm);
+      cancelBtn.removeEventListener("click", onCancel);
+      overlay.removeEventListener("click", onOverlay);
+    };
+    const onConfirm = () => { cleanup(); resolve(true); };
+    const onCancel  = () => { cleanup(); resolve(false); };
+    const onOverlay = (e) => { if (e.target === overlay) { cleanup(); resolve(false); } };
+
+    confirmBtn.addEventListener("click", onConfirm);
+    cancelBtn.addEventListener("click", onCancel);
+    overlay.addEventListener("click", onOverlay);
+  });
+}
+
+/**
+ * Show the forward-recipient modal.
+ * Returns a Promise that resolves with the entered username, or null on cancel.
+ *
+ * @returns {Promise<string|null>}
+ */
+function showForwardModal() {
+  return new Promise((resolve) => {
+    const overlay    = document.getElementById("fwd-modal-overlay");
+    const input      = document.getElementById("fwd-recipient-input");
+    const statusEl   = document.getElementById("fwd-modal-status");
+    const confirmBtn = document.getElementById("fwd-modal-confirm");
+    const cancelBtn  = document.getElementById("fwd-modal-cancel");
+
+    input.value          = "";
+    statusEl.textContent = "";
+    statusEl.className   = "fwd-modal-status";
+    overlay.style.display = "flex";
+    // Defer focus so the modal is visible before the browser scrolls.
+    requestAnimationFrame(() => input.focus());
+
+    const cleanup = () => {
+      overlay.style.display = "none";
+      confirmBtn.removeEventListener("click", onConfirm);
+      cancelBtn.removeEventListener("click", onCancel);
+      input.removeEventListener("keydown", onKeydown);
+    };
+
+    const onConfirm = () => {
+      const target = input.value.trim();
+      if (!target) {
+        statusEl.textContent = "Please enter a username.";
+        statusEl.className   = "fwd-modal-status error";
+        return;
+      }
+      if (target === currentUser?.username) {
+        statusEl.textContent = "Cannot forward to yourself.";
+        statusEl.className   = "fwd-modal-status error";
+        return;
+      }
+      cleanup();
+      resolve(target);
+    };
+    const onCancel  = () => { cleanup(); resolve(null); };
+    const onKeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); onConfirm(); } };
+
+    confirmBtn.addEventListener("click", onConfirm);
+    cancelBtn.addEventListener("click", onCancel);
+    input.addEventListener("keydown", onKeydown);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Message management features — Delete, Revoke, Download, Forward
+// ---------------------------------------------------------------------------
+
+/**
+ * Delete a message from the server and remove it from the local plaintext cache.
+ * Only the sender may delete (enforced server-side; DELETE /api/messages/{id}).
+ * If the message has an on-chain digest, a caveat is shown: the blockchain record
+ * is permanent even after server deletion.
+ *
+ * Security: JWT cookie sent automatically; CSRF token echoed by apiFetch.
+ * Access control enforced server-side — 403 returned if not the sender.
+ *
+ * @param {string}  msgId          - Server message UUID
+ * @param {boolean} hasBlockchain  - Whether a blockchain record exists for this message
+ * @param {HTMLElement} bubbleEl   - The bubble element to remove from DOM on success
+ */
+async function deleteMessage(msgId, hasBlockchain, bubbleEl) {
+  if (!msgId) return;
+
+  const warning = hasBlockchain
+    ? "Note: The blockchain record of this message remains permanently immutable — only the server copy is removed."
+    : null;
+
+  const confirmed = await showConfirmModal(
+    "Are you sure? This cannot be undone.",
+    warning,
+    "Delete",
+    true,
+  );
+  if (!confirmed) return;
+
+  try {
+    await apiFetch(`/messages/${msgId}`, { method: "DELETE" });
+    // Optimistic: remove from DOM and in-memory cache immediately.
+    bubbleEl?.remove();
+    _removeMessageFromCache(msgId);
+  } catch (err) {
+    if (err.message.includes("403") || err.message.toLowerCase().includes("access denied") ||
+        err.message.toLowerCase().includes("forbidden")) {
+      alert("You do not have permission to delete this message.");
+    } else {
+      alert("Delete failed: " + err.message);
+    }
+  }
+}
+
+/**
+ * Revoke a recipient's access to a sent message (soft-delete for recipient only).
+ * Only the sender may revoke (enforced server-side; POST /api/messages/{id}/revoke).
+ *
+ * IMPORTANT — scope of revocation:
+ *   Revocation prevents future downloads by removing the server copy from the
+ *   recipient's inbox view. It does NOT retroactively destroy copies already
+ *   decrypted by the recipient — the Double Ratchet key was consumed on first
+ *   decrypt, so we have no mechanism to reach already-decrypted plaintext.
+ *
+ * Security: JWT cookie + CSRF token; 403 returned if not the sender.
+ *
+ * @param {string}     msgId    - Server message UUID
+ * @param {HTMLElement} bubbleEl - Bubble element to mark as revoked on success
+ */
+async function revokeMessage(msgId, bubbleEl) {
+  if (!msgId) return;
+
+  const confirmed = await showConfirmModal(
+    "Revoke the recipient’s access to this message? They will no longer be able to view it.",
+    "Note: Revocation prevents future downloads. It does not retroactively destroy copies already decrypted by the recipient.",
+    "Revoke",
+    true,
+  );
+  if (!confirmed) return;
+
+  try {
+    await apiFetch(`/messages/${msgId}/revoke`, { method: "POST", body: JSON.stringify({}) });
+    // Mark bubble as revoked in UI so the sender sees the state change.
+    if (bubbleEl) {
+      bubbleEl.classList.add("revoked");
+      // Disable further revoke/delete buttons on this bubble.
+      bubbleEl.querySelectorAll(".action-btn-danger").forEach(btn => {
+        btn.disabled = true;
+        btn.style.opacity = "0.4";
+      });
+    }
+  } catch (err) {
+    if (err.message.includes("403") || err.message.toLowerCase().includes("forbidden")) {
+      alert("You do not have permission to revoke this message.");
+    } else if (err.message.includes("404")) {
+      alert("Message not found — it may have already been deleted.");
+    } else {
+      alert("Revoke failed: " + err.message);
+    }
+  }
+}
+
+/**
+ * Download a single message as a UTF-8 .txt file via the Blob API.
+ *
+ * The Double Ratchet scheme consumes each message key on first decrypt, so
+ * server ciphertext CANNOT be re-decrypted after the session has advanced.
+ * This mirrors the C++ client (MainWindow::saveMessagesToFile) which reads
+ * from the local plaintext history cache, not from the server.
+ * The decrypted plaintext is what gets written — plaintext is never sent
+ * over the wire by this function.
+ *
+ * @param {string} senderUsername - Username of the message sender
+ * @param {string} plaintext      - Decrypted message text (from in-memory cache)
+ * @param {string} msgId          - Message ID, included in the filename
+ * @param {number} tsMs           - Message timestamp in milliseconds
+ */
+function downloadMessage(senderUsername, plaintext, msgId, tsMs) {
+  const dateStr = tsMs
+    ? new Date(tsMs).toISOString().replace(/[:.]/g, "-").slice(0, 19)
+    : "unknown";
+  const filename = `message_${msgId.slice(0, 8)}_${dateStr}.txt`;
+
+  const senderLine = senderUsername === currentUser?.username ? "me" : senderUsername;
+  const content    = `[${dateStr}] ${senderLine}: ${plaintext}\n`;
+
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Revoke the object URL after a brief delay to let the download start.
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+/**
+ * Forward a message to another user via the normal Double Ratchet send path.
+ *
+ * Mirrors C++ MainWindow::onForwardSingle exactly:
+ *   1. Read decrypted plaintext from local cache (no server re-fetch needed —
+ *      the Double Ratchet key is already consumed).
+ *   2. Prepend "↪ from <origSender>: " (same Unicode arrow as C++ QChar(0x21AA)).
+ *   3. Perform TOFU key verification for the target via fetchContactKeybundle().
+ *      First contact → pin the key. Key mismatch → throw, show security warning, abort.
+ *   4. Encrypt + send via _sendText() using the normal Double Ratchet session.
+ *      Blockchain recording happens via the Tier 1 batch accumulator automatically.
+ *
+ * @param {string} origSenderUsername - Username of the original message sender
+ * @param {string} plaintext          - Decrypted plaintext of the original message
+ */
+async function forwardMessage(origSenderUsername, plaintext) {
+  const target = await showForwardModal();
+  if (!target) return;
+
+  const fwdStatusEl = document.getElementById("fwd-modal-status");
+
+  // TOFU key verification — first time: pin; mismatch: abort with warning.
+  // fetchContactKeybundle() already calls showKeyChangeWarning() on mismatch.
+  try {
+    if (fwdStatusEl) {
+      fwdStatusEl.textContent = `Verifying key for ${escapeHtml(target)}…`;
+      fwdStatusEl.className   = "fwd-modal-status";
+    }
+    await fetchContactKeybundle(target);
+  } catch (err) {
+    // TOFU violation or user not found — do not proceed.
+    alert("Cannot forward: " + err.message);
+    return;
+  }
+
+  // Construct the forwarded text exactly as the C++ client does.
+  const fwdText = "↪ from " + origSenderUsername + ": " + plaintext;
+
+  try {
+    await _sendText(target, fwdText);
+    renderThread(activeRecipient);
+    alert(`Message forwarded to ${target}.`);
+  } catch (err) {
+    alert("Forward failed: " + err.message);
+  }
 }
 
 // ---------------------------------------------------------------------------
