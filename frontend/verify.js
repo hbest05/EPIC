@@ -3,10 +3,6 @@ const ETHERSCAN_CONTRACT = "https://sepolia.etherscan.io/address/0x41A730Cbe86B3
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function localKeccak(text) {
-  return ethers.keccak256(ethers.toUtf8Bytes(text));
-}
-
 function escHtml(s) {
   return String(s)
     .replace(/&/g, "&amp;")
@@ -55,8 +51,6 @@ async function runVerify() {
     return;
   }
 
-  const localHash = rawText ? normalize(localKeccak(rawText)) : null;
-
   spinner.style.display = "block";
 
   const url = new URL(`${window.location.origin}/public/verify/${encodeURIComponent(convId)}`);
@@ -88,29 +82,13 @@ async function runVerify() {
     return;
   }
 
-  const verified    = data.verified;
-  const onChain     = normalize(data.on_chain_digest);
-  const serverLocal = normalize(data.local_digest);
-  const etherscan   = /^https:\/\//.test(data.etherscan_url ?? "") ? data.etherscan_url : ETHERSCAN_CONTRACT;
+  const verified  = data.verified;
+  const onChain   = normalize(data.on_chain_digest);
+  const etherscan = /^https:\/\//.test(data.etherscan_url ?? "") ? data.etherscan_url : ETHERSCAN_CONTRACT;
 
-  const verdictHtml = verified === null
-    ? `<div class="verdict neutral">On-chain record found — paste ciphertext above to verify integrity</div>`
-    : `<div class="verdict ${verified ? "pass" : "fail"}">
-         ${verified ? "✓ PASS — digest matches on-chain record" : "✗ FAIL — digest does not match on-chain record"}
-       </div>`;
-
-  let localSection = "";
-  if (localHash !== null) {
-    const match = localHash === onChain;
-    localSection = `
-      <div class="local-section">
-        <strong>Locally computed keccak256 (browser only — no server)</strong>
-        <code>${escHtml(localHash)}</code>
-        <div style="margin-top:4px;">${match
-          ? '<span class="match">✓ matches on-chain digest</span>'
-          : '<span class="mismatch">✗ does not match on-chain digest</span>'}</div>
-      </div>`;
-  }
+  const verdictHtml = `<div class="verdict ${verified ? "pass" : "fail"}">
+    ${verified ? "✓ PASS — digest matches on-chain record" : "✗ FAIL — digest does not match on-chain record"}
+  </div>`;
 
   resultEl.innerHTML = `
     ${verdictHtml}
@@ -118,10 +96,8 @@ async function runVerify() {
       <tr><td>Conversation ID</td><td>${escHtml(data.conversation_id ?? convId)}</td></tr>
       <tr><td>Record index</td><td>${escHtml(String(data.record_index ?? "—"))}</td></tr>
       <tr><td>On-chain digest</td><td><code>${escHtml(onChain)}</code></td></tr>
-      <tr><td>Server digest</td><td><code>${escHtml(serverLocal)}</code></td></tr>
       <tr><td>Block timestamp</td><td>${escHtml(data.timestamp ? tsToHuman(data.timestamp) : "—")}</td></tr>
       <tr><td>Contract</td>
           <td><a href="${escHtml(etherscan)}" target="_blank" rel="noopener">${escHtml(etherscan)}</a></td></tr>
-    </table>
-    ${localSection}`;
+    </table>`;
 }
