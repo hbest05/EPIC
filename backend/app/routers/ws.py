@@ -1,12 +1,11 @@
 """
 WebSocket router — real-time inbound message delivery + cover traffic heartbeats.
 
-A client opens wss://<host>/ws after login. The handshake is authenticated the
-same way as the REST API: the httpOnly `access_token` JWT cookie (also accepted
-as a `?token=` query param fallback for clients that can't attach the cookie to
-the upgrade request). On success the socket is registered in the in-process
-ConnectionManager; the /messages/send handler then pushes a `new_message`
-notification to the recipient's socket if they're connected.
+A client opens wss://<host>/ws after login. The handshake is authenticated via
+the httpOnly `access_token` JWT cookie sent automatically by the browser on
+same-origin WebSocket upgrades. On success the socket is registered in the
+in-process ConnectionManager; the /messages/send handler then pushes a
+`new_message` notification to the recipient's socket if they're connected.
 
 Cover traffic: after connecting, a background task (_heartbeat_task) sends a
 256-byte random payload to the client at uniformly random [3, 10] second
@@ -39,12 +38,12 @@ router = APIRouter()
 
 
 async def _authenticate(websocket: WebSocket) -> User | None:
-    """Resolve the access_token (cookie or ?token= query param) to a live User.
+    """Resolve the access_token cookie to a live User.
 
     Returns None on any failure — missing token, bad signature, unknown or
     inactive user — so the caller can reject the handshake.
     """
-    token = websocket.cookies.get("access_token") or websocket.query_params.get("token")
+    token = websocket.cookies.get("access_token")
     if not token:
         return None
 

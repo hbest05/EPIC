@@ -39,6 +39,9 @@ services:
       # /abi/ (where the ABI JSON lives in the image) is NOT under /app
       # so it is not shadowed by this mount.
       - ./backend:/app
+      # Mount root frontend/ so dev hot-reload serves the same files
+      # that the Dockerfile copies into the production image.
+      - ./frontend:/app/frontend
     depends_on:
       db:
         condition: service_healthy

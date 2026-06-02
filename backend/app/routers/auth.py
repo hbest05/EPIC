@@ -76,6 +76,16 @@ async def register(request: Request, body: RegisterRequest, db: AsyncSession = D
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Public keys must be valid base64",
         )
+    if len(x25519_bytes) != 32:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="x25519_public_key must be 32 bytes",
+        )
+    if len(ed25519_bytes) != 32:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="ed25519_public_key must be 32 bytes",
+        )
 
     # Create user — password hashed with Argon2id (m=65536, t=3, p=4)
     user = User(
@@ -174,7 +184,10 @@ async def login(request: Request, body: LoginRequest, response: Response, db: As
 
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(response: Response, current_user: User = Depends(get_current_user)):
+    # Require a valid session so only the authenticated user can invalidate their
+    # own cookies, and so any future server-side revocation store can be keyed
+    # to current_user.id rather than executing blindly for anonymous callers.
     response.delete_cookie("access_token")
     response.delete_cookie("csrf_token")
     return {"message": "Logged out"}

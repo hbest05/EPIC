@@ -20,11 +20,9 @@ from sqlalchemy import select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
-from app.models.message import Message
+from app.models.message import Message, UserKey
 from app.models.user import User
 from app.schemas.message import (
-    ForwardMessageRequest,
-    ForwardMessageResponse,
     MessageResponse,
     SendMessageRequest,
     SendMessageResponse,
@@ -186,6 +184,29 @@ async def send_message(
             detail="ciphertext and nonce must be valid base64",
         )
 
+    # Validate x3dh_header.ik_a against the sender's registered X25519 key.
+    # Without this check an authenticated user could supply a third party's
+    # public key, poisoning the recipient's TOFU store to pin the wrong identity.
+    if body.x3dh_header is not None:
+        key_row = await db.execute(
+            select(UserKey).where(
+                UserKey.user_id == current_user.id,
+                UserKey.key_type == "x25519",
+            )
+        )
+        registered_key = key_row.scalar_one_or_none()
+        if registered_key is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="No registered identity key found for this account",
+            )
+        expected_ik = base64.b64encode(registered_key.public_key).decode()
+        if body.x3dh_header.ik_a != expected_ik:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="x3dh_header.ik_a does not match your registered identity key",
+            )
+
     # Decide what to store in the (NOT NULL) hpke_enc_blob column.
     #   1. Double Ratchet first-message: serialise the X3DH initiator header.
     #   2. Double Ratchet follow-up:     empty bytes.
@@ -261,65 +282,6 @@ async def send_message(
 
     return SendMessageResponse(id=str(msg.id))
 
-
-# ---------------------------------------------------------------------------
-# POST /{message_id}/forward
-# ---------------------------------------------------------------------------
-
-@router.post("/{message_id}/forward", response_model=ForwardMessageResponse, status_code=status.HTTP_201_CREATED)
-async def forward_message(
-    message_id: UUID,
-    body: ForwardMessageRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession  = Depends(get_db),
-):
-    # 1. Fetch original message
-    result = await db.execute(select(Message).where(Message.id == message_id))
-    original = result.scalar_one_or_none()
-    if original is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
-
-    # 2. Caller must be sender or recipient of the original message
-    if original.sender_id != current_user.id and original.recipient_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-
-    # 3. Target user must exist
-    result = await db.execute(select(User).where(User.id == body.target_user_id))
-    target_user = result.scalar_one_or_none()
-    if target_user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target user not found")
-
-    # 4. Persist the forwarded message in its own session so the INSERT is
-    #    committed before record_event_triggered_digest opens its own session
-    #    to back-fill the tx_hash — without a prior commit the UPDATE would
-    #    target an invisible row.
-    async with AsyncSessionLocal() as session:
-        new_msg = Message(
-            sender_id=current_user.id,
-            recipient_id=body.target_user_id,
-            ciphertext=original.ciphertext,
-            hpke_enc_blob=original.hpke_enc_blob,
-            nonce=original.nonce,
-            forwarded_from_id=original.id,
-        )
-        session.add(new_msg)
-        await session.flush()
-        new_msg_id = str(new_msg.id)
-        await session.commit()
-
-    # 5. Tier 2: await blockchain recording directly — timestamp is legally significant
-    conv_id   = _conversation_id(original.sender_id, original.recipient_id)
-    b64_ctext = base64.b64encode(original.ciphertext).decode()
-    blockchain_result = await record_event_triggered_digest(conv_id, new_msg_id, b64_ctext)
-
-    tx_hash   = blockchain_result.get("tx_hash") if blockchain_result else None
-    etherscan = f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
-
-    return ForwardMessageResponse(
-        id=UUID(new_msg_id),
-        tx_hash=tx_hash,
-        etherscan_url=etherscan,
-    )
 
 
 # ---------------------------------------------------------------------------

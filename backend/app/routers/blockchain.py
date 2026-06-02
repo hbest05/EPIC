@@ -54,6 +54,7 @@ async def _do_verify(
     conversation_id: str,
     text: Optional[str],
     db: AsyncSession,
+    caller_id: uuid.UUID,
 ) -> BlockchainVerifyResponse:
     if not blockchain_configured():
         raise HTTPException(
@@ -61,22 +62,33 @@ async def _do_verify(
             detail="Blockchain integration is not configured on this server.",
         )
 
-    # Parse conversationId → two user UUIDs
+    # Parse conversationId → two user UUIDs.  Validation happens first so a
+    # malformed ID gets a 422 (not a 403) before any participant check runs,
+    # avoiding an information leak about the caller's identity.
     parts = conversation_id.split("_", 1)
     if len(parts) != 2:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="conversation_id must be in the format {uuid1}_{uuid2}",
         )
-    uuid_a, uuid_b = parts[0], parts[1]
 
     try:
-        uid_a = uuid.UUID(uuid_a)
-        uid_b = uuid.UUID(uuid_b)
+        uid_a = uuid.UUID(parts[0])
+        uid_b = uuid.UUID(parts[1])
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="conversation_id must be in the format {uuid1}_{uuid2}",
+        )
+
+    # Participant check — enforced on every route (public and authenticated).
+    # Prevents any authenticated user from probing conversation existence or
+    # retrieving on-chain metadata for conversations they are not party to.
+    # Runs after UUID parsing so the comparison is always against valid UUIDs.
+    if caller_id not in (uid_a, uid_b):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a participant in this conversation",
         )
 
     # Fetch the most recently confirmed message in this conversation
@@ -156,7 +168,7 @@ async def verify_blockchain(
     current_user: User = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),
 ):
-    return await _do_verify(conversation_id, text, db)
+    return await _do_verify(conversation_id, text, db, caller_id=current_user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -172,11 +184,15 @@ async def verify_blockchain_alias(
     current_user: User = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),
 ):
-    return await _do_verify(conversation_id, text, db)
+    return await _do_verify(conversation_id, text, db, caller_id=current_user.id)
 
 
 # ---------------------------------------------------------------------------
-# GET /public/verify/{conversation_id}  — no auth, for standalone verify page
+# GET /public/verify/{conversation_id}
+#
+# Requires authentication. The participant check is enforced inside _do_verify
+# (shared with all three verify routes) so it cannot be bypassed regardless of
+# which route is called or how the conversation_id is shaped.
 # ---------------------------------------------------------------------------
 
 @public_router.get("/{conversation_id}", response_model=BlockchainVerifyResponse)
@@ -187,9 +203,10 @@ async def verify_blockchain_public(
     text: Optional[str] = Query(default=None, max_length=65536,
                                 description="Conversation text to verify. "
                                 "If omitted, the stored ciphertext is used."),
-    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
 ):
-    return await _do_verify(conversation_id, text, db)
+    return await _do_verify(conversation_id, text, db, caller_id=current_user.id)
 
 
 # ---------------------------------------------------------------------------

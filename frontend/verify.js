@@ -61,7 +61,9 @@
     spinner.style.display = "block";
     let data, status;
     try {
-      const resp = await fetch(url.toString(), { method: "GET" });
+      // credentials:"include" sends the session cookie — the endpoint now
+      // requires authentication and verifies the caller is a participant.
+      const resp = await fetch(url.toString(), { method: "GET", credentials: "include" });
       status = resp.status;
       data = await resp.json().catch(() => null);
     } catch (_) {
