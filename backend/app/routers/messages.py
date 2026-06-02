@@ -1,10 +1,13 @@
 """
-Messages router — send, inbox, and fetch endpoints.
+Messages router — send, inbox, fetch, delete, revoke, and forward endpoints.
 
 After each message is persisted, a BackgroundTask pushes a batch entry to
 Redis. When the batch accumulator for a conversation hits BATCH_SIZE (10),
 flush_batch_if_ready() fires a single recordBatch() tx on-chain, covering
 all 10 messages in one Ethereum transaction.
+
+Added: rate limiting on delete (30/min), revoke (30/min), and forward (20/min)
+to prevent brute-force enumeration of message IDs.
 """
 
 import base64
@@ -14,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +42,7 @@ from app.services.blockchain_service import (
     record_event_triggered_digest,
 )
 from app.services.redis_service import get_redis
+from app.services.rate_limit import limiter
 from app.services.ws_manager import manager
 
 logger = logging.getLogger(__name__)
@@ -424,8 +428,10 @@ async def get_message(
 # ---------------------------------------------------------------------------
 
 @router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("30/minute")
 async def delete_message(
     message_id: UUID,
+    request: Request,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession  = Depends(get_db),
@@ -459,8 +465,10 @@ async def delete_message(
 # ---------------------------------------------------------------------------
 
 @router.post("/{message_id}/revoke")
+@limiter.limit("30/minute")
 async def revoke_message(
     message_id: UUID,
+    request: Request,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession  = Depends(get_db),
@@ -495,8 +503,10 @@ async def revoke_message(
 # ---------------------------------------------------------------------------
 
 @router.post("/{message_id}/forward", response_model=ForwardMessageResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("20/minute")
 async def forward_message(
     message_id: UUID,
+    request: Request,
     body: ForwardMessageRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),
