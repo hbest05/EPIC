@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SecureMsg</title>
+  <title>Alphra — Sign in</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -12,43 +12,58 @@
        AUTH SECTION — shown when no session is present
   ====================================================================== -->
   <section id="auth-section">
-    <h1>SecureMsg</h1>
 
-    <!-- Login form -->
-    <div id="login-form">
-      <h2>Login</h2>
-      <div class="field">
-        <input type="text" id="login-username" placeholder="Username" autocomplete="username" />
-        <span class="field-error" id="login-username-error"></span>
-      </div>
-      <div class="field">
-        <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
-        <span class="field-error" id="login-password-error"></span>
-      </div>
-      <span class="field-error form-error" id="login-form-error"></span>
-      <button id="btn-login">Login</button>
-      <p>No account? <a href="#" id="show-register">Register</a></p>
+    <!-- Looping video background -->
+    <video class="auth-video-bg" autoplay loop muted playsinline>
+      <source src="/public/backgroundLogin.mp4" type="video/mp4" />
+    </video>
+    <div class="auth-video-overlay"></div>
+
+    <!-- Top-left brand -->
+    <div class="auth-brand">
+      <img src="/public/chipmunkLogo.svg" alt="Alphra" />
+      <span class="auth-brand-name">Alphra</span>
     </div>
 
-    <!-- Register form -->
-    <div id="register-form" style="display:none;">
-      <h2>Register</h2>
-      <div class="field">
-        <input type="text" id="reg-username" placeholder="Username (3–20 chars)" autocomplete="username" />
-        <span class="field-error" id="reg-username-error"></span>
+    <!-- LEFT HALF -->
+    <div class="auth-left">
+      <img class="auth-blockchain-symbol" src="/public/blockchainSymbol.svg" alt="" />
+      <div class="auth-tagline">
+        <h1>Private messages.<br>Public proof.</h1>
+        <p>End-to-end encrypted. Blockchain verified. Only you hold the keys.</p>
       </div>
-      <div class="field">
-        <input type="email" id="reg-email" placeholder="Email" autocomplete="email" />
-        <span class="field-error" id="reg-email-error"></span>
-      </div>
-      <div class="field">
-        <input type="password" id="reg-password" placeholder="Password (min 12 chars)" autocomplete="new-password" />
-        <span class="field-error" id="reg-password-error"></span>
-      </div>
-      <span class="field-error form-error" id="reg-form-error"></span>
-      <button id="btn-register">Register &amp; Generate Keys</button>
-      <p>Have an account? <a href="#" id="show-login">Login</a></p>
     </div>
+
+    <!-- RIGHT HALF -->
+    <div class="auth-right">
+      <div class="auth-form-container" id="login-form">
+
+        <div id="registered-banner">Account created — please sign in</div>
+
+        <div class="auth-heading">
+          <img src="/public/chipmunkLogo.svg" alt="" />
+          <h2>Sign in</h2>
+        </div>
+
+        <p class="auth-sublink">or <a href="register.html">register for an account</a></p>
+
+        <div class="field">
+          <input type="text" id="login-username" placeholder="Username" autocomplete="username" />
+          <span class="field-error" id="login-username-error"></span>
+        </div>
+        <div class="field">
+          <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
+          <span class="field-error" id="login-password-error"></span>
+        </div>
+        <span class="field-error form-error" id="login-form-error"></span>
+
+        <button class="auth-submit-btn" id="btn-login">Enter</button>
+
+        <a class="auth-verify-link" href="verify.html">Verify a message on the blockchain →</a>
+
+      </div>
+    </div>
+
   </section>
 
   <!-- =====================================================================
@@ -56,37 +71,99 @@
   ====================================================================== -->
   <section id="app-section" style="display:none;">
 
+    <!-- Full-page grainy background + dark overlay -->
+    <img class="chat-bg" src="/public/messagePageBackground.svg" alt="" />
+    <div class="chat-overlay"></div>
+
+    <!-- SIDEBAR -->
     <aside id="sidebar">
-      <h2>Contacts</h2>
+
+      <!-- My username header -->
+      <div id="sidebar-header">
+        <svg class="user-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"/>
+          <circle cx="12" cy="9"  r="3"/>
+          <path d="M6.2 20.4a6 6 0 0 1 11.6 0"/>
+        </svg>
+        <span id="my-username-display"></span>
+      </div>
+
+      <!-- Search conversations -->
+      <div class="sidebar-pill search-pill">
+        <svg class="pill-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"/>
+          <path d="M21 21l-4.35-4.35"/>
+        </svg>
+        <input type="text" id="search-conversations" placeholder="Search conversations" autocomplete="off" />
+      </div>
+
+      <!-- Add friend — wraps existing new-contact + btn-add-contact -->
+      <div class="sidebar-pill add-friend-pill">
+        <button id="btn-add-contact" class="add-icon-btn" aria-label="Add friend">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M8 3v10M3 8h10"/>
+          </svg>
+        </button>
+        <input type="text" id="new-contact" placeholder="Add friend" autocomplete="off" />
+      </div>
+
+      <!-- Conversation list -->
       <ul id="contact-list"></ul>
-      <input type="text" id="new-contact" placeholder="Add contact by username" />
-      <button id="btn-add-contact">Add</button>
-      <hr />
-      <button id="btn-logout">Logout</button>
+
+      <!-- Bottom: chipmunk logo + logout -->
+      <div id="sidebar-footer">
+        <img src="/public/chipmunkLogo.svg" id="sidebar-logo" alt="Alphra" />
+        <button id="btn-logout" class="logout-btn">Logout</button>
+      </div>
+
     </aside>
 
+    <!-- CHAT PANEL -->
     <main id="chat-area">
+
+      <!-- Top bar -->
       <header id="chat-header">
-        <div id="chat-header-row">
-          <span id="chat-recipient">Select a contact</span>
-          <button id="btn-verify-chain" class="btn-small btn-secondary" style="display:none;">⛓ Verify</button>
+        <div id="chat-header-left">
+          <!-- Hamburger: mobile only -->
+          <button id="menu-toggle" aria-label="Open sidebar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M3 6h18M3 12h18M3 18h18"/>
+            </svg>
+          </button>
+          <svg class="user-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/>
+            <circle cx="12" cy="9"  r="3"/>
+            <path d="M6.2 20.4a6 6 0 0 1 11.6 0"/>
+          </svg>
+          <span id="chat-recipient">Select a conversation</span>
         </div>
-        <span id="chat-fp"></span>
+        <!-- Inline blockchain verify — shown once a contact is selected -->
+        <button id="btn-verify-chain" class="verify-pill" style="display:none;">verify</button>
       </header>
-      <div id="verify-result-panel" style="display:none; padding:0.4rem 1rem; font-size:0.82rem; border-bottom:1px solid #2d3148;"></div>
 
-      <div id="load-older-bar" style="display:none;">
-        <button id="btn-load-older" class="btn-small btn-secondary">Load older messages</button>
+      <!-- Key fingerprint display (populated when contact selected) -->
+      <div id="chat-fp"></div>
+
+      <!-- Inline blockchain verify result panel -->
+      <div id="verify-result-panel" style="display:none;"></div>
+
+      <!-- Message area -->
+      <div id="messages-wrapper">
+        <button id="btn-load-older" style="display:none;">Load older messages</button>
+        <div id="message-list"></div>
       </div>
 
-      <div id="message-list">
-        <!-- Messages injected here by app.js -->
-      </div>
-
+      <!-- Compose bar -->
       <footer id="compose-area">
-        <textarea id="plaintext-input" placeholder="Type a message…" rows="3"></textarea>
-        <button id="btn-send">Send (Encrypted)</button>
+        <textarea id="plaintext-input" placeholder="type message here" rows="1"></textarea>
+        <button id="btn-send" aria-label="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <path d="M22 2L11 13"/>
+            <path d="M22 2L15 22l-4-9-9-4 20-7z"/>
+          </svg>
+        </button>
       </footer>
+
     </main>
 
   </section>

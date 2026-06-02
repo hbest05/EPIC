@@ -23,6 +23,8 @@ from app.database import AsyncSessionLocal, get_db
 from app.models.message import Message, UserKey
 from app.models.user import User
 from app.schemas.message import (
+    ForwardMessageRequest,
+    ForwardMessageResponse,
     MessageResponse,
     SendMessageRequest,
     SendMessageResponse,
@@ -34,6 +36,7 @@ from app.services.blockchain_service import (
     is_configured,
     flush_batch_if_ready,
     push_to_batch,
+    record_event_triggered_digest,
 )
 from app.services.redis_service import get_redis
 from app.services.ws_manager import manager
@@ -141,6 +144,7 @@ async def _push_to_batch_and_maybe_flush(
     is sent — guaranteeing the INSERT is committed before we do any UPDATE.
     Never raises: errors are logged and the app continues normally.
     """
+    logger.warning("BATCH task called msg=%s configured=%s", message_id[:8], is_configured())
     if not is_configured():
         return
     try:
@@ -265,7 +269,9 @@ async def send_message(
         logger.error("ws push scheduling failed for message %s: %s", msg.id, exc)
 
     conv_id      = _conversation_id(current_user.id, recipient.id)
-    timestamp    = datetime.now(timezone.utc).isoformat()
+    # Use msg.created_at so the batch payload can be reconstructed from the DB
+    # deterministically during blockchain verification.
+    timestamp    = msg.created_at.isoformat() if msg.created_at else datetime.now(timezone.utc).isoformat()
     content_hash = compute_content_hash(body.ciphertext)
 
     # Tier 1: push to batch accumulator; flush when BATCH_SIZE is reached.
@@ -476,11 +482,85 @@ async def revoke_message(
         )
 
     msg.deleted_for_recipient = True
-    # get_db() commits before BackgroundTasks run, so the push fires after the
-    # flag is persisted — the recipient drops it from their local cache.
     background_tasks.add_task(
         manager.send_to_user,
         str(msg.recipient_id),
         {"type": "message_deleted", "message_id": str(msg.id)},
     )
     return {"revoked": True}
+
+
+# ---------------------------------------------------------------------------
+# POST /{message_id}/forward  (Tier 2 — immediate blockchain record)
+# ---------------------------------------------------------------------------
+
+@router.post("/{message_id}/forward", response_model=ForwardMessageResponse, status_code=status.HTTP_201_CREATED)
+async def forward_message(
+    message_id: UUID,
+    body: ForwardMessageRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+):
+    """Forward a message to a third party.
+
+    The forwarding act is timestamped immediately on-chain (Tier 2) via
+    recordDigest() so the moment of forwarding is provably recorded.
+    The new message row is committed BEFORE the blockchain call so the
+    back-fill UPDATE can find it.
+    """
+    # Load the original message and verify the caller is a participant.
+    result = await db.execute(
+        select(Message, User.username)
+        .join(User, User.id == Message.sender_id)
+        .where(Message.id == message_id)
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    orig_msg, sender_username = row
+    if orig_msg.sender_id != current_user.id and orig_msg.recipient_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    # Resolve target user.
+    target_result = await db.execute(select(User).where(User.username == body.target_username))
+    target = target_result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target user not found")
+
+    # Persist the forwarded row in a dedicated session with explicit commit
+    # BEFORE the blockchain call — so the back-fill UPDATE can find the row.
+    async with AsyncSessionLocal() as session:
+        fwd = Message(
+            sender_id=current_user.id,
+            recipient_id=target.id,
+            ciphertext=orig_msg.ciphertext,
+            hpke_enc_blob=orig_msg.hpke_enc_blob,
+            nonce=orig_msg.nonce,
+            ratchet_public_key=orig_msg.ratchet_public_key,
+            previous_chain_length=orig_msg.previous_chain_length,
+            message_index=orig_msg.message_index,
+            forwarded_from_id=orig_msg.id,
+        )
+        session.add(fwd)
+        await session.commit()
+        await session.refresh(fwd)
+        fwd_id = str(fwd.id)
+
+    conv_id      = _conversation_id(current_user.id, target.id)
+    content_hash = compute_content_hash(base64.b64encode(orig_msg.ciphertext).decode())
+
+    blockchain_result = await record_event_triggered_digest(
+        conversation_id=conv_id,
+        message_id=fwd_id,
+        conversation_text=content_hash,
+    )
+
+    tx_hash   = blockchain_result.get("tx_hash") if blockchain_result else None
+    etherscan = f"https://sepolia.etherscan.io/tx/{tx_hash}" if tx_hash else None
+
+    return ForwardMessageResponse(
+        id=fwd_id,
+        tx_hash=tx_hash,
+        etherscan_url=etherscan,
+    )

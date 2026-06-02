@@ -46,7 +46,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "default-src 'none'; "
                 "script-src 'self' https://cdnjs.cloudflare.com; "
                 "connect-src 'self'; "
-                "style-src 'self' 'unsafe-inline'"
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self'; "
+                "media-src 'self'; "
+                "font-src 'self'"
             )
         elif request.url.path not in _DOCS_PATHS:
             response.headers["Content-Security-Policy"] = (

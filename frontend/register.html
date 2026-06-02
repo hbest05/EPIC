@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alphra — Create account</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <section id="auth-section">
+
+    <!-- Looping video background -->
+    <video class="auth-video-bg" autoplay loop muted playsinline>
+      <source src="/public/backgroundLogin.mp4" type="video/mp4" />
+    </video>
+    <div class="auth-video-overlay"></div>
+
+    <!-- Top-left brand -->
+    <div class="auth-brand">
+      <img src="/public/chipmunkLogo.svg" alt="Alphra" />
+      <span class="auth-brand-name">Alphra</span>
+    </div>
+
+    <!-- LEFT HALF -->
+    <div class="auth-left">
+      <img class="auth-blockchain-symbol" src="/public/blockchainSymbol.svg" alt="" />
+      <div class="auth-tagline">
+        <h1>Private messages.<br>Public proof.</h1>
+        <p>End-to-end encrypted. Blockchain verified. Only you hold the keys.</p>
+      </div>
+    </div>
+
+    <!-- RIGHT HALF -->
+    <div class="auth-right">
+      <div class="auth-form-container">
+
+        <div class="auth-heading">
+          <img src="/public/chipmunkLogo.svg" alt="" />
+          <h2>Create account</h2>
+        </div>
+
+        <p class="auth-sublink">or <a href="index.html">sign in</a></p>
+
+        <input type="text"     id="reg-username" placeholder="Username"         autocomplete="username" />
+        <input type="email"    id="reg-email"    placeholder="Email"            autocomplete="email" />
+        <input type="password" id="reg-password" placeholder="Password"         autocomplete="new-password" />
+        <input type="password" id="reg-confirm"  placeholder="Confirm password" autocomplete="new-password" />
+        <span id="reg-password-error" class="auth-error" style="display:none;">Passwords do not match</span>
+
+        <button class="auth-submit-btn" id="btn-register">Register</button>
+
+        <a class="auth-verify-link" href="verify.html">Verify a message on the blockchain →</a>
+
+      </div>
+    </div>
+
+  </section>
+
+  <script type="module" src="register.js"></script>
+</body>
+</html>
