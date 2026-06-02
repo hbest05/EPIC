@@ -244,11 +244,10 @@ async def verify_blockchain_by_users(
     ua = result_a.scalar_one_or_none()
     ub = result_b.scalar_one_or_none()
 
-    missing = [name for name, obj in ((user_a, ua), (user_b, ub)) if obj is None]
-    if missing:
+    if ua is None or ub is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User(s) not found: {', '.join(missing)}",
+            detail="No blockchain record found for this conversation.",
         )
 
     a, b = str(ua.id), str(ub.id)
