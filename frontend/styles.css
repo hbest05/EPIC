@@ -641,6 +641,9 @@ input.invalid {
 
 /* Key fingerprint display below chat header */
 #chat-fp {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 4px 20px;
   font-size: 11px;
   color: rgba(255, 255, 255, 0.7);
@@ -649,11 +652,30 @@ input.invalid {
   flex-shrink: 0;
 }
 
-#chat-fp:not(:empty)::before {
+#chat-fp-text:not(:empty)::before {
   content: "Key fingerprint: ";
   color: rgba(255, 255, 255, 0.45);
   font-family: inherit;
   font-size: inherit;
+}
+
+#btn-copy-fp {
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.35);
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+
+#btn-copy-fp:hover { color: rgba(255, 255, 255, 0.75); }
+
+#btn-copy-fp svg {
+  width: 13px;
+  height: 13px;
 }
 
 /* Inline blockchain verify result panel */

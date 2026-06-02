@@ -62,7 +62,7 @@ async def _do_verify(
     conversation_id: str,
     text: Optional[str],
     db: AsyncSession,
-    caller_id: uuid.UUID,
+    caller_id: Optional[uuid.UUID] = None,
 ) -> BlockchainVerifyResponse:
     if not blockchain_configured():
         raise HTTPException(
@@ -89,11 +89,10 @@ async def _do_verify(
             detail="conversation_id must be in the format {uuid1}_{uuid2}",
         )
 
-    # Participant check — enforced on every route (public and authenticated).
-    # Prevents any authenticated user from probing conversation existence or
-    # retrieving on-chain metadata for conversations they are not party to.
-    # Runs after UUID parsing so the comparison is always against valid UUIDs.
-    if caller_id not in (uid_a, uid_b):
+    # Participant check — only enforced for authenticated callers.
+    # The public verify route passes caller_id=None and skips this check
+    # so the standalone verify page works without a session.
+    if caller_id is not None and caller_id not in (uid_a, uid_b):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not a participant in this conversation",
@@ -200,9 +199,8 @@ async def verify_blockchain_alias(
 # ---------------------------------------------------------------------------
 # GET /public/verify/{conversation_id}
 #
-# Requires authentication. The participant check is enforced inside _do_verify
-# (shared with all three verify routes) so it cannot be bypassed regardless of
-# which route is called or how the conversation_id is shaped.
+# No authentication required — used by the standalone verify.html page.
+# The participant check is skipped; rate-limited to 30 req/min per IP.
 # ---------------------------------------------------------------------------
 
 @public_router.get("/{conversation_id}", response_model=BlockchainVerifyResponse)
@@ -213,10 +211,9 @@ async def verify_blockchain_public(
     text: Optional[str] = Query(default=None, max_length=65536,
                                 description="Conversation text to verify. "
                                 "If omitted, the stored ciphertext is used."),
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession   = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    return await _do_verify(conversation_id, text, db, caller_id=current_user.id)
+    return await _do_verify(conversation_id, text, db)
 
 
 # ---------------------------------------------------------------------------

@@ -835,8 +835,10 @@ function showAuth() {
   if (messageList) messageList.innerHTML = "";
   const chatRecipient = document.getElementById("chat-recipient");
   if (chatRecipient) chatRecipient.textContent = "Select a conversation";
-  const chatFp = document.getElementById("chat-fp");
-  if (chatFp) chatFp.textContent = "";
+  const chatFpText = document.getElementById("chat-fp-text");
+  const btnCopyFp  = document.getElementById("btn-copy-fp");
+  if (chatFpText) chatFpText.textContent = "";
+  if (btnCopyFp)  btnCopyFp.style.display = "none";
 
   // Always land on the login form (no-op when register-form doesn't exist on this page).
   const loginForm    = document.getElementById("login-form");
@@ -1048,8 +1050,10 @@ function addContactToSidebar(username, fingerprintHex, isFirstContact) {
     if (verifyPanel) verifyPanel.style.display = "none";
 
     // Show key fingerprint in header and reveal the inline verify button.
-    const chatFp = document.getElementById("chat-fp");
-    if (chatFp) chatFp.textContent = fingerprintHex ? _formatFingerprint(fingerprintHex) : "";
+    const chatFpText = document.getElementById("chat-fp-text");
+    const btnCopyFp  = document.getElementById("btn-copy-fp");
+    if (chatFpText) chatFpText.textContent = fingerprintHex ? _formatFingerprint(fingerprintHex) : "";
+    if (btnCopyFp)  btnCopyFp.style.display = fingerprintHex ? "inline-flex" : "none";
 
     const verifyBtn = document.getElementById("btn-verify-chain");
     if (verifyBtn) verifyBtn.style.display = _blockchainConfigured ? "inline-flex" : "none";
@@ -1077,6 +1081,26 @@ function addContactToSidebar(username, fingerprintHex, isFirstContact) {
 function _formatFingerprint(hex) {
   return hex.match(/.{1,8}/g).join(" ");
 }
+
+// Copy key fingerprint to clipboard with brief checkmark feedback.
+document.getElementById("btn-copy-fp")?.addEventListener("click", async () => {
+  const text = document.getElementById("chat-fp-text")?.textContent;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    return;
+  }
+  const btn  = document.getElementById("btn-copy-fp");
+  const icon = document.getElementById("copy-fp-icon");
+  if (!btn || !icon) return;
+  icon.innerHTML = '<polyline points="2 8 6 12 14 4"/>';
+  btn.style.color = "rgba(52,211,153,0.9)";
+  setTimeout(() => {
+    icon.innerHTML = '<rect x="5" y="5" width="8" height="10" rx="1.5"/><path d="M3 11V3a1 1 0 0 1 1-1h8"/>';
+    btn.style.color = "";
+  }, 1500);
+});
 
 // ---------------------------------------------------------------------------
 // API helper
