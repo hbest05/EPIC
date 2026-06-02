@@ -59,16 +59,12 @@ let wsReconnectTimer = null;
 
 const contacts       = new Map(); // username → KeyBundleResponse
 const sessions       = new Map(); // username → Double Ratchet session
-const messageCache   = new Map(); // convId   → [{ id, sender, plaintext, timestamp, blockchain_confirmed }]
+const messageCache   = new Map(); // convId   → [{ id, sender, plaintext, timestamp }]
 const renderLimits   = new Map(); // username → number of messages to render
 const seenMessageIds = new Set(); // server message IDs already processed this session
 
 let activeRecipient = null;
 let inboxPoller     = null;
-let confirmPoller   = null;
-
-// Message IDs rendered with ⏳ that haven't been confirmed on-chain yet.
-const pendingConfirmations = new Set();
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -812,49 +808,13 @@ async function _topUpOPKs() {
 
 function startInboxPoller() {
   inboxPoller   = setInterval(fetchInbox, POLL_INTERVAL_MS);
-  confirmPoller = setInterval(_checkPendingConfirmations, 15_000);
 }
 
 function stopInboxPoller() {
   clearInterval(inboxPoller);
-  clearInterval(confirmPoller);
   inboxPoller   = null;
-  confirmPoller = null;
 }
 
-async function _checkPendingConfirmations() {
-  if (pendingConfirmations.size === 0) return;
-  for (const msgId of [...pendingConfirmations]) {
-    try {
-      const msg = await apiFetch(`/messages/${msgId}`);
-      if (!msg.blockchain_confirmed) continue;
-
-      pendingConfirmations.delete(msgId);
-
-      // Update the badge in every visible bubble with this message ID.
-      document.querySelectorAll(`[data-message-id="${CSS.escape(msgId)}"]`).forEach(bubble => {
-        const badge = bubble.querySelector(".badge-pending");
-        if (badge) {
-          badge.className = "badge-verified";
-          badge.title     = "Blockchain verified";
-          badge.textContent = "✓";
-        }
-      });
-
-      // Keep in-memory caches in sync so re-renders show ✓ too.
-      for (const entries of decryptedCache.values()) {
-        const e = entries.find(x => x.meta?.id === msgId);
-        if (e) e.meta.blockchain_confirmed = true;
-      }
-      for (const msgs of messageCache.values()) {
-        const m = msgs.find(x => x.id === msgId);
-        if (m) m.blockchain_confirmed = true;
-      }
-    } catch {
-      pendingConfirmations.delete(msgId);
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // UI helpers
@@ -974,19 +934,11 @@ function _appendBubble(list, senderUsername, plaintext, meta = {}) {
     : (meta.timestamp ? Date.parse(meta.timestamp) : 0);
   const timeStr = formatTimestamp(tsMs);
 
-  const badgeHtml = meta.blockchain_confirmed
-    ? '<span class="badge-verified" title="Blockchain verified">✓</span>'
-    : (tsMs ? '<span class="badge-pending" title="Pending blockchain confirmation">⏳</span>' : "");
-
   bubble.innerHTML =
     `<div class="bubble-text">${escapeHtml(plaintext)}</div>` +
-    `<div class="bubble-meta">${escapeHtml(timeStr)}${badgeHtml}</div>`;
+    `<div class="bubble-meta">${escapeHtml(timeStr)}</div>`;
 
   list.appendChild(bubble);
-
-  if (meta.id && !meta.blockchain_confirmed && meta.timestamp) {
-    pendingConfirmations.add(meta.id);
-  }
 }
 
 function escapeHtml(str) {

@@ -643,10 +643,17 @@ input.invalid {
 #chat-fp {
   padding: 4px 20px;
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.7);
   font-family: 'Courier New', monospace;
   letter-spacing: 0.05em;
   flex-shrink: 0;
+}
+
+#chat-fp:not(:empty)::before {
+  content: "Key fingerprint: ";
+  color: rgba(255, 255, 255, 0.45);
+  font-family: inherit;
+  font-size: inherit;
 }
 
 /* Inline blockchain verify result panel */
@@ -735,26 +742,6 @@ input.invalid {
   gap: 4px;
 }
 
-/* Blockchain verification badges */
-.badge-verified {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  background: #5b8dd9;
-  border-radius: 50%;
-  color: #fff;
-  font-size: 9px;
-  font-weight: bold;
-  flex-shrink: 0;
-}
-
-.badge-pending {
-  font-size: 12px;
-  opacity: 0.6;
-  flex-shrink: 0;
-}
 
 /* Compose bar */
 #compose-area {
@@ -873,7 +860,7 @@ input.invalid {
 .btn-secondary { background: #374151; }
 .btn-secondary:hover { background: #4b5563; }
 
-#chat-header { display: flex; flex-direction: column; gap: 2px; padding: 0.5rem 1rem; border-bottom: 1px solid #2d3148; }
+#chat-header { display: flex; flex-direction: row; align-items: center; justify-content: space-between; padding: 0.5rem 1rem; border-bottom: 1px solid #2d3148; }
 #chat-header-row { display: flex; align-items: center; justify-content: space-between; }
-#chat-fp { font-size: 0.68rem; color: #94a3b8; font-family: monospace; }
+#chat-fp { font-size: 0.68rem; font-family: monospace; }
 
