@@ -197,31 +197,12 @@ async def verify_blockchain_alias(
 
 
 # ---------------------------------------------------------------------------
-# GET /public/verify/{conversation_id}
-#
-# No authentication required — used by the standalone verify.html page.
-# The participant check is skipped; rate-limited to 30 req/min per IP.
-# ---------------------------------------------------------------------------
-
-@public_router.get("/{conversation_id}", response_model=BlockchainVerifyResponse)
-@limiter.limit("30/minute")
-async def verify_blockchain_public(
-    request: Request,
-    conversation_id: str,
-    text: Optional[str] = Query(default=None, max_length=65536,
-                                description="Conversation text to verify. "
-                                "If omitted, the stored ciphertext is used."),
-    db: AsyncSession = Depends(get_db),
-):
-    return await _do_verify(conversation_id, text, db)
-
-
-# ---------------------------------------------------------------------------
 # GET /api/verify-public/by-users?user_a=alice&user_b=bob
 #
 # Username-pair lookup — resolves two usernames to their UUIDs, constructs
 # the canonical conversation_id, then delegates to _do_verify.
 # No authentication required; rate-limited to 30 req/min per IP.
+# MUST be defined before /{conversation_id} so FastAPI matches it first.
 # ---------------------------------------------------------------------------
 
 @public_router.get("/by-users", response_model=BlockchainVerifyResponse)
@@ -252,6 +233,26 @@ async def verify_blockchain_by_users(
 
     a, b = str(ua.id), str(ub.id)
     conversation_id = f"{min(a, b)}_{max(a, b)}"
+    return await _do_verify(conversation_id, text, db)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/verify-public/{conversation_id}
+#
+# No authentication required — used by the standalone verify.html page.
+# The participant check is skipped; rate-limited to 30 req/min per IP.
+# ---------------------------------------------------------------------------
+
+@public_router.get("/{conversation_id}", response_model=BlockchainVerifyResponse)
+@limiter.limit("30/minute")
+async def verify_blockchain_public(
+    request: Request,
+    conversation_id: str,
+    text: Optional[str] = Query(default=None, max_length=65536,
+                                description="Conversation text to verify. "
+                                "If omitted, the stored ciphertext is used."),
+    db: AsyncSession = Depends(get_db),
+):
     return await _do_verify(conversation_id, text, db)
 
 
