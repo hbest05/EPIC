@@ -96,7 +96,7 @@ def derive_sk_sender(
         log.error("x3dh_send: spk_sig wrong length: got %d, expected 64", len(spk_sig))
         raise InvalidBundleError("spk_sig: expected 64 bytes")
 
-    log.info(
+    log.debug(
         "x3dh_send: verifying SPK sig\n"
         "  sign_pub (Ed25519, %d bytes) fp=%s\n"
         "    b64=%s\n"

@@ -15,6 +15,7 @@
 #include <QString>
 #include <QByteArray>
 #include <QDateTime>
+#include <QJsonObject>
 
 class Message
 {
@@ -22,6 +23,10 @@ public:
     enum class Direction { Sent, Received };
 
     Message() = default;
+
+    // --- Serialisation ---
+    QJsonObject toJson() const;
+    static Message fromJson(const QJsonObject& obj);
 
     // --- Identity ---
     QString id() const { return m_id; }
