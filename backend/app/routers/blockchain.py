@@ -217,6 +217,46 @@ async def verify_blockchain_public(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/verify-public/by-users?user_a=alice&user_b=bob
+#
+# Username-pair lookup — resolves two usernames to their UUIDs, constructs
+# the canonical conversation_id, then delegates to _do_verify.
+# No authentication required; rate-limited to 30 req/min per IP.
+# ---------------------------------------------------------------------------
+
+@public_router.get("/by-users", response_model=BlockchainVerifyResponse)
+@limiter.limit("30/minute")
+async def verify_blockchain_by_users(
+    request: Request,
+    user_a: str = Query(..., max_length=64, description="First participant's username"),
+    user_b: str = Query(..., max_length=64, description="Second participant's username"),
+    text: Optional[str] = Query(default=None, max_length=65536),
+    db: AsyncSession = Depends(get_db),
+):
+    if user_a.lower() == user_b.lower():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="user_a and user_b must be different users",
+        )
+
+    result_a = await db.execute(select(User).where(User.username == user_a))
+    result_b = await db.execute(select(User).where(User.username == user_b))
+    ua = result_a.scalar_one_or_none()
+    ub = result_b.scalar_one_or_none()
+
+    missing = [name for name, obj in ((user_a, ua), (user_b, ub)) if obj is None]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User(s) not found: {', '.join(missing)}",
+        )
+
+    a, b = str(ua.id), str(ub.id)
+    conversation_id = f"{min(a, b)}_{max(a, b)}"
+    return await _do_verify(conversation_id, text, db)
+
+
+# ---------------------------------------------------------------------------
 # POST /api/conversations/{conversation_id}/close  (Tier 3 — final digest)
 # ---------------------------------------------------------------------------
 
