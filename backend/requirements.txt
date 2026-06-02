@@ -8,7 +8,9 @@ asyncpg==0.29.0          # async PostgreSQL driver
 alembic==1.13.1
 
 # Auth / security
-python-jose[cryptography]==3.3.0   # JWT encode/decode
+# python-jose replaced by PyJWT — PYSEC-2024-232 (algorithm confusion) and
+# PYSEC-2024-233 (DoS on decode) make python-jose 3.3.0 unsafe (COMP-01).
+PyJWT[cryptography]>=2.8.0         # JWT encode/decode
 argon2-cffi==23.1.0               # Argon2id password hashing
 passlib[argon2]==1.7.4
 slowapi==0.1.9                     # Request rate limiting (5/min auth, 60/min messaging)
