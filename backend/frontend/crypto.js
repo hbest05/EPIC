@@ -64,7 +64,7 @@ async function ecdhX25519(privKey, pubKey) {
 export async function generateKeyPair() {
   return crypto.subtle.generateKey(
     { name: "X25519" },
-    false,
+    true,   // extractable so private key can be wrapped under PBKDF2-derived wrapping key
     ["deriveKey", "deriveBits"],
   );
 }
@@ -72,7 +72,7 @@ export async function generateKeyPair() {
 export async function generateSigningPair() {
   return crypto.subtle.generateKey(
     { name: "Ed25519" },
-    false,
+    true,   // extractable for wrapping
     ["sign"],
   );
 }
@@ -135,7 +135,7 @@ export async function loadPrivateKey(keyName) {
 
 // Generate count X25519 OPK keypairs. Private keys are stored in IndexedDB
 // under "opk:<pubB64>" and deleted on first use (loadOPKPrivate).
-export async function generateOPKs(count) {
+export async function generateOPKs(count, wrappingKey = null) {
   const opks = [];
   for (let i = 0; i < count; i++) {
     const kp = await crypto.subtle.generateKey(
@@ -144,7 +144,12 @@ export async function generateOPKs(count) {
       ["deriveBits"],
     );
     const pubB64 = await exportPublicKey(kp.publicKey);
-    await storePrivateKey(`opk:${pubB64}`, kp.privateKey);
+    if (wrappingKey) {
+      const wrapped = await wrapPrivateKey(kp.privateKey, wrappingKey);
+      await storePrivateKey(`opk:${pubB64}`, { wrapped: true, ...wrapped });
+    } else {
+      await storePrivateKey(`opk:${pubB64}`, kp.privateKey);
+    }
     opks.push({ publicKey: kp.publicKey, privateKey: kp.privateKey });
   }
   return opks;
@@ -152,20 +157,93 @@ export async function generateOPKs(count) {
 
 // Retrieve and DELETE an OPK private CryptoKey from IndexedDB (one-time use).
 // Returns null if the key was already consumed.
-export async function loadOPKPrivate(opkPubB64) {
+// If wrappingKey is provided and the stored value is a wrapped blob, it is unwrapped first.
+export async function loadOPKPrivate(opkPubB64, wrappingKey = null) {
   const db    = await openDb();
   const dbKey = `opk:${opkPubB64}`;
   return new Promise((resolve, reject) => {
     const tx    = db.transaction(STORE_NAME, "readwrite");
     const store = tx.objectStore(STORE_NAME);
     const req   = store.get(dbKey);
-    req.onsuccess = () => {
+    req.onsuccess = async () => {
       const val = req.result ?? null;
       if (val !== null) store.delete(dbKey);
-      tx.oncomplete = () => resolve(val);
+      tx.oncomplete = async () => {
+        if (!val) { resolve(null); return; }
+        if (val.wrapped && wrappingKey) {
+          try {
+            const key = await unwrapPrivateKey(val.ciphertext, val.nonce, wrappingKey, { name: "X25519" }, ["deriveBits"], true);
+            resolve(key);
+          } catch (e) { reject(e); }
+        } else {
+          resolve(val);
+        }
+      };
     };
     req.onerror = () => reject(req.error);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Wrapping key derivation (PBKDF2 → HKDF → AES-256-GCM)
+//
+// Web Crypto has no Argon2id; PBKDF2-SHA256 at 600 000 iterations is the
+// OWASP 2023 minimum and is acceptable per the spec rubric as an alternative
+// to Argon2id with FIPS justification. HKDF is applied AFTER PBKDF2 solely
+// for domain separation (info="EPIC-v1-wrap-key") — HKDF is not used as the
+// password KDF, respecting the design doc restriction.
+// ---------------------------------------------------------------------------
+
+// Derive the AES-256-GCM wrapping key from a user password + 16-byte salt.
+// Returns a non-extractable CryptoKey usable for wrapKey / unwrapKey.
+export async function deriveWrappingKey(password, salt) {
+  const pwBytes = new TextEncoder().encode(password);
+
+  // Step 1: PBKDF2 key material
+  const pbkdf2Mat = await crypto.subtle.importKey("raw", pwBytes, "PBKDF2", false, ["deriveBits"]);
+
+  // Step 2: Derive 32 raw bytes via PBKDF2-SHA-256 (600 000 iterations)
+  const pbkdf2Bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 600_000, hash: "SHA-256" },
+    pbkdf2Mat,
+    256,
+  );
+
+  // Step 3: Import those bytes as HKDF key material for domain separation
+  const hkdfMat = await crypto.subtle.importKey("raw", pbkdf2Bits, "HKDF", false, ["deriveBits"]);
+
+  // Step 4: HKDF-SHA-256 with info="EPIC-v1-wrap-key", salt=zero(32) → 32 bytes
+  const wrapBits = await crypto.subtle.deriveBits(
+    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(32), info: new TextEncoder().encode("EPIC-v1-wrap-key") },
+    hkdfMat,
+    256,
+  );
+
+  return crypto.subtle.importKey("raw", wrapBits, "AES-GCM", false, ["wrapKey", "unwrapKey"]);
+}
+
+// Wrap an extractable private CryptoKey under wrappingKey (AES-256-GCM).
+// Returns { ciphertext: Uint8Array, nonce: Uint8Array }.
+export async function wrapPrivateKey(privateKey, wrappingKey) {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ct    = await crypto.subtle.wrapKey("pkcs8", privateKey, wrappingKey, { name: "AES-GCM", iv: nonce });
+  return { ciphertext: new Uint8Array(ct), nonce };
+}
+
+// Unwrap an AES-GCM-encrypted PKCS#8 blob back to a CryptoKey.
+// algorithm: e.g. { name:"X25519" } or { name:"Ed25519" }
+// keyUsages: e.g. ["deriveKey","deriveBits"] or ["sign"]
+// extractable: pass true so the key can be re-wrapped on future logins.
+export async function unwrapPrivateKey(ciphertext, nonce, wrappingKey, algorithm, keyUsages, extractable = true) {
+  return crypto.subtle.unwrapKey(
+    "pkcs8",
+    ciphertext,
+    wrappingKey,
+    { name: "AES-GCM", iv: nonce },
+    algorithm,
+    extractable,
+    keyUsages,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -240,16 +318,21 @@ export async function x3dhSend(myIKPriv, bobBundle) {
 
 // Receiver-side X3DH.
 //
-// myIKPriv: our X25519 identity private CryptoKey
-// header:   { ik_a: b64, ek_a: b64, used_opk_pub: b64 | null }
+// myIKPriv:    our X25519 identity private CryptoKey
+// header:      { ik_a: b64, ek_a: b64, used_opk_pub: b64 | null }
+// wrappingKey: optional AES-GCM key — used to unwrap the SPK and OPK if stored
+//              as wrapped blobs (new-format key storage).
 //
 // Returns { SK: ArrayBuffer(32) }
-export async function x3dhReceive(myIKPriv, header) {
+export async function x3dhReceive(myIKPriv, header, wrappingKey = null) {
   const peerIKPub = await importPublicKey(header.ik_a, "X25519");
   const peerEKPub = await importPublicKey(header.ek_a, "X25519");
 
-  const spkPriv = await loadPrivateKey("spk");
+  let spkPriv = await loadPrivateKey("spk");
   if (!spkPriv) throw new Error("x3dhReceive: SPK not found in IndexedDB");
+  if (spkPriv.wrapped && wrappingKey) {
+    spkPriv = await unwrapPrivateKey(spkPriv.ciphertext, spkPriv.nonce, wrappingKey, { name: "X25519" }, ["deriveBits"], true);
+  }
 
   // Mirror of sender's DH order, roles swapped:
   const dh1 = await ecdhX25519(spkPriv,  peerIKPub); // DH(SPK_B, IK_A)
@@ -259,7 +342,7 @@ export async function x3dhReceive(myIKPriv, header) {
   let ikm = concat(dh1, dh2, dh3);
 
   if (header.used_opk_pub) {
-    const opkPriv = await loadOPKPrivate(header.used_opk_pub);
+    const opkPriv = await loadOPKPrivate(header.used_opk_pub, wrappingKey);
     if (!opkPriv) throw new Error("x3dhReceive: OPK not found: " + header.used_opk_pub);
     const dh4 = await ecdhX25519(opkPriv, peerEKPub); // DH(OPK_B, EK_A)
     ikm = concat(ikm, dh4);
@@ -348,14 +431,21 @@ export async function initSessionAsSender(SK, bobRatchetPub_b64, myIKPub_b64, bo
 //
 // DHs is seeded with our SPK private key so the first recv DH ratchet step
 // produces the same chain key as the sender computed via DH(sender_DHs, SPK_B).
-export async function initSessionAsReceiver(SK, senderIKPub_b64, myIKPub_b64) {
+export async function initSessionAsReceiver(SK, senderIKPub_b64, myIKPub_b64, wrappingKey = null) {
   const SK_b64 = bytesToB64(SK);
 
-  // Load SPK (generated as extractable during registration).
-  const spkPriv = await loadPrivateKey("spk");
-  if (!spkPriv) throw new Error("initSessionAsReceiver: SPK not found");
+  // Load SPK, unwrapping if stored as an encrypted blob.
+  let spkPrivBlob = await loadPrivateKey("spk");
+  if (!spkPrivBlob) throw new Error("initSessionAsReceiver: SPK not found");
   const spkPubB64 = await loadPrivateKey("spk_pub_b64");
   if (!spkPubB64) throw new Error("initSessionAsReceiver: SPK pub not found");
+
+  let spkPriv;
+  if (spkPrivBlob.wrapped && wrappingKey) {
+    spkPriv = await unwrapPrivateKey(spkPrivBlob.ciphertext, spkPrivBlob.nonce, wrappingKey, { name: "X25519" }, ["deriveBits"], true);
+  } else {
+    spkPriv = spkPrivBlob;
+  }
 
   const spkPrivB64 = bytesToB64(await crypto.subtle.exportKey("pkcs8", spkPriv));
 

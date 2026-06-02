@@ -67,8 +67,13 @@
 
     <main id="chat-area">
       <header id="chat-header">
-        <span id="chat-recipient">Select a contact</span>
+        <div id="chat-header-row">
+          <span id="chat-recipient">Select a contact</span>
+          <button id="btn-verify-chain" class="btn-small btn-secondary" style="display:none;">⛓ Verify</button>
+        </div>
+        <span id="chat-fp"></span>
       </header>
+      <div id="verify-result-panel" style="display:none; padding:0.4rem 1rem; font-size:0.82rem; border-bottom:1px solid #2d3148;"></div>
 
       <div id="message-list">
         <!-- Messages injected here by app.js -->
@@ -82,7 +87,7 @@
 
   </section>
 
-  <script type="module" src="crypto.js"></script>
-  <script type="module" src="app.js"></script>
+  <script type="module" src="crypto.js?v=5"></script>
+  <script type="module" src="app.js?v=5"></script>
 </body>
 </html>

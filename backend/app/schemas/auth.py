@@ -62,6 +62,14 @@ class UploadPrekeysRequest(BaseModel):
     one_time_prekeys: list[OneTimePrekeyUpload] = Field(..., min_length=1, max_length=100)
 
 
+class UploadOPKsRequest(BaseModel):
+    one_time_prekeys: list[OneTimePrekeyUpload] = Field(..., min_length=1, max_length=100)
+
+
+class OPKCountResponse(BaseModel):
+    opk_count: int
+
+
 # ---------------------------------------------------------------------------
 # Key bundle response
 # ---------------------------------------------------------------------------
@@ -79,6 +87,7 @@ class OPKBundle(BaseModel):
 
 class KeyBundleResponse(BaseModel):
     username: str
+    user_id: str          # UUID of the user — used by clients to construct conversation_id for blockchain verify
     # Long-term identity keys
     ik_x25519: str       # base64 raw X25519 — used in X3DH DH operations
     ik_ed25519: str      # base64 raw Ed25519 — verifies SPK signature

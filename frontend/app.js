@@ -23,6 +23,9 @@ import {
   ratchetDecrypt,
   saveSession,
   loadSession,
+  deriveWrappingKey,
+  wrapPrivateKey,
+  unwrapPrivateKey,
 } from "./crypto.js";
 
 const API_BASE         = "http://localhost:8000/api";
@@ -36,6 +39,9 @@ let currentUser    = null;        // { id, username }
 let myPrivateKey   = null;        // X25519 CryptoKey (loaded from IndexedDB)
 let mySigningKey   = null;        // Ed25519 CryptoKey (loaded from IndexedDB)
 let myPublicKeyB64 = null;        // our X25519 IK public key, base64
+let wrappingKey    = null;        // AES-GCM key derived from password — in memory only, never stored
+let ws             = null;        // WebSocket connection (null when not connected)
+let wsReconnectTimer = null;      // setTimeout handle for reconnect backoff
 const contacts     = new Map();   // username → KeyBundleResponse (session cache only)
 const sessions     = new Map();   // username → session object (mirrors IndexedDB)
 const seenMessageIds = new Set(); // prevents re-processing fetched messages
@@ -48,12 +54,20 @@ let inboxPoller     = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   try {
-    currentUser    = await apiFetch("/auth/me");
-    myPrivateKey   = await loadPrivateKey("x25519");
-    mySigningKey   = await loadPrivateKey("ed25519");
-    myPublicKeyB64 = await loadPrivateKey("my_ik_pub_b64");
-    showApp();
-    startInboxPoller();
+    currentUser = await apiFetch("/auth/me");
+
+    const ikBlob = await loadPrivateKey("x25519");
+    if (ikBlob instanceof CryptoKey) {
+      // Old-format non-extractable key — usable directly.
+      myPrivateKey = ikBlob;
+      mySigningKey = await loadPrivateKey("ed25519");
+      myPublicKeyB64 = await loadPrivateKey("my_ik_pub_b64");
+      showApp();
+      startInboxPoller();
+    } else {
+      // Wrapped or missing — need password to unwrap; show login.
+      showAuth();
+    }
   } catch {
     showAuth();
   }
@@ -61,8 +75,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   attachEventListeners();
 });
 
+// Handle bfcache restore — browser may show a frozen snapshot on back-nav
+// without re-running DOMContentLoaded. Re-check session state and clear forms.
 window.addEventListener("pageshow", (e) => {
   if (e.persisted) {
+    disconnectWebSocket();
     showAuth();
   }
 });
@@ -177,32 +194,35 @@ async function register() {
       }),
     });
 
-    // Persist long-term private keys in IndexedDB only after server confirms.
-    await storePrivateKey("x25519",        x25519Priv);
-    await storePrivateKey("ed25519",       ed25519Priv);
-    await storePrivateKey("my_ik_pub_b64", x25519PubB64);
-
-    // Generate SPK (extractable so it can be used as initial DHs in X3DH receive).
-    const spkKP = await crypto.subtle.generateKey(
-      { name: "X25519" },
-      true,
-      ["deriveBits"],
-    );
+    // Generate SPK.
+    const spkKP = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
     const spkPubB64   = await exportPublicKey(spkKP.publicKey);
     const spkPubBytes = Uint8Array.from(atob(spkPubB64), c => c.charCodeAt(0));
     const spkSigB64   = await signMessage(spkPubBytes.buffer, ed25519Priv);
 
-    await storePrivateKey("spk",         spkKP.privateKey);
-    await storePrivateKey("spk_pub_b64", spkPubB64);
-
     // Login first so the auth cookie is set before uploading prekeys.
+    const regBtn = document.getElementById("btn-register");
+    if (regBtn) regBtn.textContent = "Generating keys…";
     currentUser = await apiFetch("/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password, client_type: "web" }),
     });
 
-    // Generate 10 OPKs (private keys stored in IndexedDB by generateOPKs).
-    const opks  = await generateOPKs(10);
+    // Derive wrapping key from password (PBKDF2 600k → HKDF → AES-GCM).
+    const wrapSalt = crypto.getRandomValues(new Uint8Array(16));
+    wrappingKey    = await deriveWrappingKey(password, wrapSalt);
+
+    // Wrap all private keys and store encrypted blobs + salt.
+    await storePrivateKey("wrap_salt",     wrapSalt);
+    await storePrivateKey("x25519",        await wrapPrivateKey(x25519Priv,      wrappingKey));
+    await storePrivateKey("ed25519",       await wrapPrivateKey(ed25519Priv,     wrappingKey));
+    await storePrivateKey("spk",           await wrapPrivateKey(spkKP.privateKey, wrappingKey));
+    await storePrivateKey("my_ik_pub_b64", x25519PubB64);
+    await storePrivateKey("spk_pub_b64",   spkPubB64);
+    await storePrivateKey("spk_created_at", Date.now());
+
+    // Generate 10 OPKs with wrapping.
+    const opks  = await generateOPKs(10, wrappingKey);
     const keyId = Math.floor(Date.now() / 1000);
 
     await apiFetch("/auth/prekeys", {
@@ -225,6 +245,7 @@ async function register() {
     myPrivateKey   = x25519Priv;
     mySigningKey   = ed25519Priv;
     myPublicKeyB64 = x25519PubB64;
+    if (regBtn) regBtn.textContent = "Register & Generate Keys";
     showApp();
     startInboxPoller();
   } catch (err) {
@@ -239,19 +260,53 @@ async function login() {
   const username = document.getElementById("login-username").value.trim();
   const password = document.getElementById("login-password").value;
 
+  const loginBtn = document.getElementById("btn-login");
   try {
-    currentUser    = await apiFetch("/auth/login", {
+    currentUser = await apiFetch("/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password, client_type: "web" }),
     });
-    myPrivateKey   = await loadPrivateKey("x25519");
-    mySigningKey   = await loadPrivateKey("ed25519");
+
+    const ikBlob = await loadPrivateKey("x25519");
+    if (ikBlob instanceof CryptoKey) {
+      // Old-format (pre-wrapping) keys — use directly and show migration notice.
+      myPrivateKey = ikBlob;
+      mySigningKey = await loadPrivateKey("ed25519");
+      showMigrationNotice();
+    } else if (ikBlob?.wrapped) {
+      // New-format wrapped keys — derive the wrapping key then unwrap.
+      const salt = await loadPrivateKey("wrap_salt");
+      if (!salt) throw new Error("Corrupt key store — please re-register.");
+      if (loginBtn) loginBtn.textContent = "Unlocking keys…";
+      wrappingKey  = await deriveWrappingKey(password, salt);
+      const sigBlob = await loadPrivateKey("ed25519");
+      myPrivateKey  = await unwrapPrivateKey(ikBlob.ciphertext, ikBlob.nonce, wrappingKey, { name: "X25519" }, ["deriveKey", "deriveBits"], true);
+      mySigningKey  = await unwrapPrivateKey(sigBlob.ciphertext, sigBlob.nonce, wrappingKey, { name: "Ed25519" }, ["sign"], true);
+    } else {
+      throw new Error("No keys found — please register.");
+    }
+
     myPublicKeyB64 = await loadPrivateKey("my_ik_pub_b64");
     showApp();
     startInboxPoller();
+    maybeReplenishPrekeys().catch(err => console.error("prekey replenishment failed:", err));
   } catch (err) {
     setFormError("login-form-error", err.message);
+  } finally {
+    if (loginBtn) loginBtn.textContent = "Login";
   }
+}
+
+function showMigrationNotice() {
+  const banner = document.createElement("div");
+  banner.style.cssText = "position:fixed;top:0;left:0;right:0;background:#92400e;color:#fff;padding:12px 20px;font-size:14px;z-index:9999;text-align:center;";
+  banner.textContent = "Your keys were stored without encryption. Re-register to enable at-rest key protection.";
+  const btn = document.createElement("button");
+  btn.textContent = "Dismiss";
+  btn.style.cssText = "margin-left:16px;padding:3px 12px;font-size:13px;cursor:pointer;";
+  btn.onclick = () => banner.remove();
+  banner.appendChild(btn);
+  document.body.prepend(banner);
 }
 
 async function logout() {
@@ -262,6 +317,8 @@ async function logout() {
     myPrivateKey   = null;
     mySigningKey   = null;
     myPublicKeyB64 = null;
+    wrappingKey    = null;
+    disconnectWebSocket();
     stopInboxPoller();
     showAuth();
   }
@@ -337,14 +394,16 @@ async function fetchContactKeybundle(username) {
   const bundle      = await apiFetch(`/auth/user/${username}/keybundle`);
   const fingerprint = await computeFingerprint(bundle.ik_x25519);
 
-  const pin = await getPin(username);
-  if (pin === null) {
+  const pin   = await getPin(username);
+  const isNew = pin === null;
+  if (isNew) {
     await storePin(username, fingerprint);
   } else if (pin.ikFingerprint !== fingerprint) {
     showKeyChangeWarning(username);
     throw new Error(`TOFU violation: key changed for ${username}`);
   }
   contacts.set(username, bundle);
+  addContactToSidebar(username, fingerprint, isNew);
   return bundle;
 }
 
@@ -424,8 +483,8 @@ async function fetchInbox() {
         let session = sessions.get(sender) ?? await loadSession(sender);
 
         if (!session && msg.x3dh_header) {
-          const { SK } = await x3dhReceive(myPrivateKey, msg.x3dh_header);
-          session = await initSessionAsReceiver(SK, msg.x3dh_header.ik_a, myPublicKeyB64);
+          const { SK } = await x3dhReceive(myPrivateKey, msg.x3dh_header, wrappingKey);
+          session = await initSessionAsReceiver(SK, msg.x3dh_header.ik_a, myPublicKeyB64, wrappingKey);
         }
 
         if (!session) {
@@ -450,6 +509,160 @@ async function fetchInbox() {
     console.error("fetchInbox: inbox fetch failed", err);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Blockchain verification
+// ---------------------------------------------------------------------------
+
+async function verifyBlockchain(username) {
+  const bundle = contacts.get(username);
+  if (!bundle?.user_id) {
+    const panel = document.getElementById("verify-result-panel");
+    if (panel) { panel.textContent = "Re-add this contact to enable verification."; panel.style.display = "block"; }
+    return;
+  }
+
+  const ids    = [currentUser.id, bundle.user_id].sort();
+  const convId = ids[0] + "_" + ids[1];
+  const panel  = document.getElementById("verify-result-panel");
+  if (panel) { panel.textContent = "Verifying…"; panel.style.display = "block"; }
+
+  try {
+    const res = await fetch(`${API_BASE.replace("/api", "")}/public/verify/${encodeURIComponent(convId)}`, { credentials: "include" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (panel) panel.textContent = "Verify failed: " + (err.detail || `HTTP ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    if (!panel) return;
+    if (data.verified) {
+      const ts = data.timestamp ? new Date(data.timestamp * 1000).toLocaleString() : "";
+      // Validate URL scheme before injecting into href — escapeHtml does not strip javascript: URIs.
+      const safeUrl = /^https:\/\//.test(data.etherscan_url ?? "") ? data.etherscan_url : "#";
+      panel.innerHTML = `<span style="color:#34d399">&#10003; Chain verified</span> — digest matches on-chain record${ts ? " @ " + escapeHtml(ts) : ""}. ` +
+        `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" style="color:#818cf8">Etherscan</a>`;
+    } else {
+      panel.innerHTML = `<span style="color:#ef4444">&#10007; Mismatch</span> — on-chain: <code>${escapeHtml((data.on_chain_digest || "").slice(0, 18))}…</code> ` +
+        `local: <code>${escapeHtml((data.local_digest || "").slice(0, 18))}…</code>`;
+    }
+  } catch (err) {
+    if (panel) panel.textContent = "Verify error: " + err.message;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket — real-time delivery + heartbeat cover traffic
+// ---------------------------------------------------------------------------
+
+function connectWebSocket() {
+  if (ws && ws.readyState <= WebSocket.OPEN) return;
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.addEventListener("open", () => {
+    stopInboxPoller(); // WS handles real-time; keep polling as fallback on close
+  });
+
+  ws.addEventListener("message", (event) => {
+    try {
+      const frame = JSON.parse(event.data);
+      if (frame.type === "new_message") {
+        fetchInbox();
+      }
+      // heartbeat and unknown frame types are silently discarded
+    } catch {
+      // non-JSON frame — ignore
+    }
+  });
+
+  ws.addEventListener("close", () => {
+    ws = null;
+    startInboxPoller(); // resume polling as fallback
+    if (currentUser) {
+      wsReconnectTimer = setTimeout(connectWebSocket, 5000);
+    }
+  });
+
+  ws.addEventListener("error", () => {
+    // error always followed by close — handled there
+  });
+}
+
+function disconnectWebSocket() {
+  clearTimeout(wsReconnectTimer);
+  if (ws) { ws.close(); ws = null; }
+}
+
+// ---------------------------------------------------------------------------
+// SPK rotation + OPK replenishment
+// ---------------------------------------------------------------------------
+
+const OPK_LOW_WATERMARK = 5;
+const OPK_BATCH_SIZE    = 10;
+const SPK_ROTATION_MS   = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+async function maybeReplenishPrekeys() {
+  if (!wrappingKey) return; // old-format session — migration notice guides user to re-register
+
+  const { opk_count } = await apiFetch("/auth/prekeys/count");
+  const spkCreatedAt   = await loadPrivateKey("spk_created_at");
+  const spkAgeMs       = spkCreatedAt != null ? Date.now() - spkCreatedAt : Infinity;
+
+  if (spkAgeMs > SPK_ROTATION_MS) {
+    await _rotateSpkAndTopUpOpks();
+  } else if (opk_count < OPK_LOW_WATERMARK) {
+    await _topUpOpks();
+  }
+}
+
+async function _rotateSpkAndTopUpOpks() {
+  const spkKP       = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+  const spkPubB64   = await exportPublicKey(spkKP.publicKey);
+  const spkPubBytes = Uint8Array.from(atob(spkPubB64), c => c.charCodeAt(0));
+  const spkSigB64   = await signMessage(spkPubBytes.buffer, mySigningKey);
+  const opks        = await generateOPKs(OPK_BATCH_SIZE, wrappingKey);
+  const keyId       = Math.floor(Date.now() / 1000);
+
+  await storePrivateKey("spk",           await wrapPrivateKey(spkKP.privateKey, wrappingKey));
+  await storePrivateKey("spk_pub_b64",   spkPubB64);
+  await storePrivateKey("spk_created_at", Date.now());
+
+  await apiFetch("/auth/prekeys", {
+    method: "POST",
+    body: JSON.stringify({
+      signed_prekey:    { key_id: keyId, public_key: spkPubB64, signature: spkSigB64 },
+      one_time_prekeys: await Promise.all(
+        opks.map(async (kp, i) => ({
+          key_id:     keyId * 100 + i,
+          public_key: await exportPublicKey(kp.publicKey),
+        }))
+      ),
+    }),
+  });
+}
+
+async function _topUpOpks() {
+  const opks  = await generateOPKs(OPK_BATCH_SIZE, wrappingKey);
+  const keyId = Math.floor(Date.now() / 1000);
+
+  await apiFetch("/auth/opks", {
+    method: "POST",
+    body: JSON.stringify({
+      one_time_prekeys: await Promise.all(
+        opks.map(async (kp, i) => ({
+          key_id:     keyId * 100 + i,
+          public_key: await exportPublicKey(kp.publicKey),
+        }))
+      ),
+    }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Inbox polling
+// ---------------------------------------------------------------------------
 
 function startInboxPoller() {
   inboxPoller = setInterval(fetchInbox, POLL_INTERVAL_MS);
@@ -485,6 +698,7 @@ function showAuth() {
 function showApp() {
   document.getElementById("auth-section").style.display = "none";
   document.getElementById("app-section").style.display  = "flex";
+  connectWebSocket();
 }
 
 function renderMessage(senderUsername, plaintext) {
@@ -538,12 +752,15 @@ function attachEventListeners() {
     const username = input.value.trim();
     if (!username) return;
     try {
-      await fetchContactKeybundle(username);
-      addContactToSidebar(username);
+      await fetchContactKeybundle(username); // also calls addContactToSidebar internally
       input.value = "";
     } catch (err) {
       alert(err.message);
     }
+  });
+
+  document.getElementById("btn-verify-chain")?.addEventListener("click", () => {
+    if (activeRecipient) verifyBlockchain(activeRecipient);
   });
 
   // Allow Send on Enter (Shift+Enter for newline).
@@ -552,20 +769,63 @@ function attachEventListeners() {
   });
 }
 
-function addContactToSidebar(username) {
+function addContactToSidebar(username, fingerprintHex, isNew) {
   const list = document.getElementById("contact-list");
   if (!list) return;
-  if (list.querySelector(`[data-username="${CSS.escape(username)}"]`)) return;
+
+  // If already in the list, update the fingerprint display and return.
+  const existing = list.querySelector(`[data-username="${CSS.escape(username)}"]`);
+  if (existing) {
+    _updateContactFp(existing, fingerprintHex, isNew);
+    return;
+  }
+
   const li = document.createElement("li");
   li.dataset.username = username;
-  li.textContent      = username;
   li.style.cursor     = "pointer";
+
+  const nameSpan = document.createElement("span");
+  nameSpan.textContent = username;
+  li.appendChild(nameSpan);
+
+  if (fingerprintHex) _updateContactFp(li, fingerprintHex, isNew);
+
   li.addEventListener("click", () => {
     activeRecipient = username;
     document.getElementById("chat-recipient").textContent = username;
     document.getElementById("message-list").innerHTML = "";
+    document.getElementById("verify-result-panel").style.display = "none";
+
+    // Show fingerprint + verify button in chat header.
+    const bundle = contacts.get(username);
+    const fp = document.getElementById("chat-fp");
+    if (fp && fingerprintHex) {
+      fp.textContent = "Key: " + _formatFp(fingerprintHex);
+    } else if (fp) {
+      fp.textContent = "";
+    }
+    const verifyBtn = document.getElementById("btn-verify-chain");
+    if (verifyBtn) verifyBtn.style.display = bundle?.user_id ? "inline-block" : "none";
   });
+
   list.appendChild(li);
+}
+
+function _formatFp(hex) {
+  return hex.match(/.{1,8}/g).join(" ");
+}
+
+function _updateContactFp(li, fingerprintHex, isNew) {
+  let fpEl = li.querySelector(".contact-fp");
+  if (!fpEl) {
+    fpEl = document.createElement("div");
+    fpEl.className = "contact-fp";
+    li.appendChild(fpEl);
+  }
+  const badgeClass = isNew ? "fp-new" : "fp-pinned";
+  const badgeText  = isNew ? " ⚠ new" : " ✓";
+  fpEl.innerHTML = escapeHtml(_formatFp(fingerprintHex)) +
+    `<span class="${badgeClass}">${badgeText}</span>`;
 }
 
 // ---------------------------------------------------------------------------

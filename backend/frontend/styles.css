@@ -158,3 +158,14 @@ button:hover {
   margin-top: 4px;
 }
 
+.contact-fp   { font-size: 0.68rem; color: #94a3b8; font-family: monospace; word-break: break-all; margin-top: 2px; }
+.fp-new       { color: #f59e0b; font-size: 0.68rem; }
+.fp-pinned    { color: #34d399; font-size: 0.68rem; }
+.btn-small    { width: auto; padding: 0.25rem 0.6rem; font-size: 0.78rem; }
+.btn-secondary { background: #374151; }
+.btn-secondary:hover { background: #4b5563; }
+
+#chat-header { display: flex; flex-direction: column; gap: 2px; padding: 0.5rem 1rem; border-bottom: 1px solid #2d3148; }
+#chat-header-row { display: flex; align-items: center; justify-content: space-between; }
+#chat-fp { font-size: 0.68rem; color: #94a3b8; font-family: monospace; }
+

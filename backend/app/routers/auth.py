@@ -18,8 +18,10 @@ from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
     OPKBundle,
+    OPKCountResponse,
     RegisterRequest,
     SPKBundle,
+    UploadOPKsRequest,
     UploadPrekeysRequest,
     UserPublicProfile,
     _VALID_CLIENT_TYPES,
@@ -248,6 +250,44 @@ async def upload_prekeys(
     # get_db commits all inserts on success; returns 204 No Content
 
 
+@router.get("/prekeys/count", response_model=OPKCountResponse)
+async def get_opk_count(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the number of unused OPKs remaining for the current user."""
+    result = await db.execute(
+        select(OneTimePrekey)
+        .where(OneTimePrekey.user_id == current_user.id, OneTimePrekey.used.is_(False))
+    )
+    count = len(result.scalars().all())
+    return OPKCountResponse(opk_count=count)
+
+
+@router.post("/opks", status_code=status.HTTP_204_NO_CONTENT)
+async def upload_opks(
+    body: UploadOPKsRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a batch of fresh OPKs without rotating the SPK."""
+    try:
+        for opk in body.one_time_prekeys:
+            base64.b64decode(opk.public_key, validate=True)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="All public_key fields must be valid base64",
+        )
+
+    for opk in body.one_time_prekeys:
+        db.add(OneTimePrekey(
+            user_id=current_user.id,
+            key_id=opk.key_id,
+            public_key=opk.public_key,
+        ))
+
+
 @router.get("/user/{username}/keybundle", response_model=KeyBundleResponse)
 async def get_keybundle(
     username: str,
@@ -307,6 +347,7 @@ async def get_keybundle(
     # UserKey.public_key is BYTEA — encode to base64 for the wire
     return KeyBundleResponse(
         username=target.username,
+        user_id=str(target.id),
         ik_x25519=base64.b64encode(ik_x25519.public_key).decode(),
         ik_ed25519=base64.b64encode(ik_ed25519.public_key).decode(),
         ik_fingerprint=ik_x25519.key_fingerprint,
