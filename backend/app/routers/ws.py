@@ -22,6 +22,7 @@ import base64
 import logging
 import os
 import random
+import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from jose import JWTError, jwt
@@ -55,11 +56,20 @@ async def _authenticate(websocket: WebSocket) -> User | None:
     except JWTError:
         return None
 
+    # User.id is a UUID(as_uuid=True) column — asyncpg needs a uuid.UUID, not
+    # the plain string from the JWT sub claim, or the query silently matches
+    # nothing and auth fails (surfacing as a 1008/403).
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        return None
+
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
+        result = await session.execute(select(User).where(User.id == uid))
         user = result.scalar_one_or_none()
 
     if user is None or not user.is_active:
+        logger.warning("ws auth: no user found for id=%r", uid)
         return None
     return user
 

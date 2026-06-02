@@ -9,6 +9,7 @@
 #include "User.hpp"
 #include <QDebug>
 #include <QFile>
+#include <utility>
 
 User::User(const QString& username)
     : m_username(username)
@@ -18,6 +19,42 @@ User::User(const QString& username)
 User::~User()
 {
     freePrivateKeys();
+}
+
+User::User(User&& other) noexcept
+    : m_username(std::move(other.m_username)),
+      m_userId(std::move(other.m_userId)),
+      m_x25519PublicKey(std::move(other.m_x25519PublicKey)),
+      m_ed25519PublicKey(std::move(other.m_ed25519PublicKey)),
+      m_x25519PrivateKey(other.m_x25519PrivateKey),
+      m_ed25519PrivateKey(other.m_ed25519PrivateKey)
+{
+    // Steal ownership of the locked key memory — null the source so ~User()
+    // there does not free it a second time (freePrivateKeys() null-checks).
+    other.m_x25519PrivateKey  = nullptr;
+    other.m_ed25519PrivateKey = nullptr;
+}
+
+User& User::operator=(User&& other) noexcept
+{
+    if (this == &other) {
+        return *this;
+    }
+
+    // Release our own key material before taking over other's.
+    freePrivateKeys();
+
+    m_username         = std::move(other.m_username);
+    m_userId           = std::move(other.m_userId);
+    m_x25519PublicKey  = std::move(other.m_x25519PublicKey);
+    m_ed25519PublicKey = std::move(other.m_ed25519PublicKey);
+    m_x25519PrivateKey  = other.m_x25519PrivateKey;
+    m_ed25519PrivateKey = other.m_ed25519PrivateKey;
+
+    other.m_x25519PrivateKey  = nullptr;
+    other.m_ed25519PrivateKey = nullptr;
+
+    return *this;
 }
 
 void User::freePrivateKeys()

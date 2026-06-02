@@ -20,14 +20,17 @@
 #include <QtCore/QList>
 #include <QtCore/QString>
 #include <memory>
+#include <optional>
 #include <string>
+
+#include "User.hpp"
 
 class CryptoDaemonClient;
 
 class Client
 {
 public:
-    explicit Client(std::shared_ptr<CryptoDaemonClient> daemon);
+    explicit Client(std::unique_ptr<CryptoDaemonClient> daemon);
     ~Client();
 
     Client(const Client&) = delete;
@@ -59,15 +62,27 @@ public:
     /** GET /auth/user/<username>/keybundle. */
     QString fetchKeybundle(const QString& username, QJsonObject* out);
 
+    /** Revoke a single message for its recipient ("delete for recipient only")
+     *  via POST /messages/<messageId>/revoke. Only the sender may do this.
+     *  @returns empty string on success, error message on failure. */
+    QString revokeAccess(const QString& messageId);
+
     // --- Messages ---
 
-    /** POST /messages/send with Double Ratchet header fields. */
+    /** POST /messages/send with Double Ratchet header fields.
+     *  On success: empty string returned; if outId is non-null, receives the
+     *  server-assigned message UUID (used by deleteMessage). */
     QString sendMessage(const QString& recipient,
                         const QByteArray& ciphertext,
                         const QByteArray& nonce,
                         const QByteArray& ratchetPub,
                         int pn, int n,
-                        const QJsonObject* x3dhHeader);
+                        const QJsonObject* x3dhHeader,
+                        QString* outId = nullptr);
+
+    /** DELETE /messages/<messageId>. Returns empty string on success (204),
+     *  or an error string if the server returned 403/404/other. */
+    QString deleteMessage(const QString& messageId);
 
     /** GET /messages/inbox with optional pagination.
      *  @param limit     max messages to return (server caps at 100)
@@ -92,6 +107,12 @@ public:
     bool isAuthenticated()        const { return !m_csrfToken.isEmpty(); }
     CryptoDaemonClient* daemon()  const { return m_daemon.get(); }
 
+    // --- Current user (public identity only; private keys live in the daemon) ---
+    bool hasCurrentUser() const { return m_currentUser.has_value(); }
+    const User& currentUser() const { return m_currentUser.value(); }
+    void setCurrentUser(User u) { m_currentUser = std::move(u); }
+    void clearCurrentUser() { m_currentUser.reset(); }
+
     /** wss:// URL of the real-time delivery socket on the same host as the API. */
     QString websocketUrl() const { return QStringLiteral("wss://") + m_baseHostname + QStringLiteral("/ws"); }
 
@@ -113,7 +134,9 @@ private:
     QString m_baseUrl      = QStringLiteral("https://alpha-and-the-cryptmunks.theburkenator.com");
     QString m_baseHostname = QStringLiteral("alpha-and-the-cryptmunks.theburkenator.com");
 
-    std::shared_ptr<CryptoDaemonClient> m_daemon;
+    std::unique_ptr<CryptoDaemonClient> m_daemon;
+
+    std::optional<User> m_currentUser;
 
     QString m_username;
     QString m_csrfToken;

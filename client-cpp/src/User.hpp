@@ -22,8 +22,8 @@ public:
     // Disable copy to prevent accidental duplication of key material
     User(const User&) = delete;
     User& operator=(const User&) = delete;
-    User(User&&) = default;
-    User& operator=(User&&) = default;
+    User(User&&) noexcept;
+    User& operator=(User&&) noexcept;
 
     // --- Identity ---
     QString username() const { return m_username; }

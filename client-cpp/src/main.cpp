@@ -115,15 +115,15 @@ int main(int argc, char* argv[])
         }
     }
 
-    std::shared_ptr<CryptoDaemonClient> daemon;
+    std::unique_ptr<CryptoDaemonClient> daemon;
     try {
-        daemon = std::make_shared<CryptoDaemonClient>();
+        daemon = std::make_unique<CryptoDaemonClient>();
     } catch (const CryptoDaemonError& e) {
         QMessageBox::critical(nullptr, "Crypto daemon", e.message());
         return 1;
     }
 
-    Client client(daemon);
+    Client client(std::move(daemon));
     client.initialize();
 
     LoginWindow login(&client);

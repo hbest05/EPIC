@@ -31,11 +31,9 @@ size_t writeToByteArray(char* ptr, size_t size, size_t nmemb, void* userdata)
     return size * nmemb;
 }
 
-QString utf8(const QByteArray& b) { return QString::fromUtf8(b); }
-
 } // namespace
 
-Client::Client(std::shared_ptr<CryptoDaemonClient> daemon)
+Client::Client(std::unique_ptr<CryptoDaemonClient> daemon)
     : m_daemon(std::move(daemon))
 {
 }
@@ -212,8 +210,15 @@ QString Client::registerUser(const QString& username,
     if (!m_lastError.isEmpty()) return m_lastError;
 
     const QJsonObject obj = QJsonDocument::fromJson(resp).object();
-    return obj.value(QStringLiteral("detail")).toString(
-        QStringLiteral("registration failed (HTTP %1)").arg(m_lastStatus));
+    const QJsonValue detail = obj.value(QStringLiteral("detail"));
+    // FastAPI Pydantic errors return detail as an array of {loc, msg, type} objects.
+    if (detail.isArray()) {
+        const QJsonArray arr = detail.toArray();
+        if (!arr.isEmpty())
+            return arr.first().toObject().value(QStringLiteral("msg")).toString(
+                QStringLiteral("registration failed (HTTP %1)").arg(m_lastStatus));
+    }
+    return detail.toString(QStringLiteral("registration failed (HTTP %1)").arg(m_lastStatus));
 }
 
 QString Client::login(const QString& username, const QString& password)
@@ -249,6 +254,7 @@ void Client::logout()
                       QByteArrayLiteral("{}"));
     m_csrfToken.clear();
     m_username.clear();
+    clearCurrentUser();
     if (!m_cookieJarPath.empty()) {
         QFile::remove(QString::fromStdString(m_cookieJarPath));
     }
@@ -269,6 +275,7 @@ QString Client::uploadPrekeys(const QByteArray& spkPub,
     spk.insert(QStringLiteral("signature"),  QString::fromUtf8(spkSig.toBase64()));
 
     QJsonArray opkArr;
+    // Sequential index required for key_id assignment — raw loop intentional over std::transform
     for (int i = 0; i < opks.size(); ++i) {
         QJsonObject o;
         o.insert(QStringLiteral("key_id"),     static_cast<double>(spkKeyId * 100 + i));
@@ -305,12 +312,26 @@ QString Client::fetchKeybundle(const QString& username, QJsonObject* out)
     return {};
 }
 
+QString Client::revokeAccess(const QString& messageId)
+{
+    const QByteArray resp = httpRequest(
+        QStringLiteral("POST"),
+        QStringLiteral("/api/messages/") + messageId + QStringLiteral("/revoke"),
+        QByteArrayLiteral("{}"));
+    if (m_lastStatus == 200 || m_lastStatus == 201) return {};
+    if (!m_lastError.isEmpty()) return m_lastError;
+    const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+    return obj.value(QStringLiteral("detail")).toString(
+        QStringLiteral("revoke failed (HTTP %1)").arg(m_lastStatus));
+}
+
 QString Client::sendMessage(const QString& recipient,
                             const QByteArray& ciphertext,
                             const QByteArray& nonce,
                             const QByteArray& ratchetPub,
                             int pn, int n,
-                            const QJsonObject* x3dhHeader)
+                            const QJsonObject* x3dhHeader,
+                            QString* outId)
 {
     QJsonObject body;
     body.insert(QStringLiteral("recipient_username"), recipient);
@@ -326,11 +347,29 @@ QString Client::sendMessage(const QString& recipient,
     const QByteArray resp = httpRequest(QStringLiteral("POST"),
                                         QStringLiteral("/api/messages/send"),
                                         QJsonDocument(body).toJson(QJsonDocument::Compact));
-    if (m_lastStatus == 201 || m_lastStatus == 200) return {};
+    if (m_lastStatus == 201 || m_lastStatus == 200) {
+        if (outId) {
+            *outId = QJsonDocument::fromJson(resp).object()
+                         .value(QStringLiteral("id")).toString();
+        }
+        return {};
+    }
     if (!m_lastError.isEmpty()) return m_lastError;
     const QJsonObject obj = QJsonDocument::fromJson(resp).object();
     return obj.value(QStringLiteral("detail")).toString(
         QStringLiteral("send failed (HTTP %1)").arg(m_lastStatus));
+}
+
+QString Client::deleteMessage(const QString& messageId)
+{
+    const QByteArray resp = httpRequest(QStringLiteral("DELETE"),
+                                        QStringLiteral("/api/messages/") + messageId,
+                                        {});
+    if (m_lastStatus == 204) return {};
+    if (!m_lastError.isEmpty()) return m_lastError;
+    const QJsonObject obj = QJsonDocument::fromJson(resp).object();
+    return obj.value(QStringLiteral("detail")).toString(
+        QStringLiteral("delete failed (HTTP %1)").arg(m_lastStatus));
 }
 
 namespace {
