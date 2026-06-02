@@ -69,6 +69,7 @@ app.include_router(blockchain.public_router,        prefix="/public/verify",    
 
 
 app.mount("/static", StaticFiles(directory="/app/frontend"), name="static")
+app.mount("/public", StaticFiles(directory="/app/public"),   name="public-static")
 
 
 @app.on_event("startup")

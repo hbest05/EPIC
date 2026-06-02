@@ -44,11 +44,22 @@ const seenMessageIds = new Set(); // prevents re-processing fetched messages
 let activeRecipient = null;
 let inboxPoller     = null;
 
+// In-session cache of decrypted messages, keyed by conversation partner username.
+// Never persisted — private keys stay in IndexedDB, plaintexts stay in RAM only.
+const decryptedCache  = new Map(); // username → [{sender, plaintext, meta}]
+let oldestLoadedId    = null;      // cursor for "Load older messages" pagination
+
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
 
 document.addEventListener("DOMContentLoaded", async () => {
+  // Show "Account created" banner when redirected from register page.
+  if (new URLSearchParams(location.search).get("registered") === "true") {
+    const banner = document.getElementById("registered-banner");
+    if (banner) banner.style.display = "block";
+  }
+
   try {
     currentUser    = await apiFetch("/auth/me");
     myPrivateKey   = await loadPrivateKey("x25519");
@@ -314,7 +325,10 @@ async function sendMessage() {
       }),
     });
 
-    renderMessage(currentUser.username, plaintext);
+    renderMessage(currentUser.username, plaintext, {
+      timestamp:            new Date().toISOString(),
+      blockchain_confirmed: false,
+    });
     input.value = "";
   } catch (err) {
     console.error("sendMessage failed:", err);
@@ -354,7 +368,11 @@ async function fetchInbox() {
         sessions.set(sender, session);
         await saveSession(sender, session);
 
-        renderMessage(sender, plaintext);
+        renderMessage(sender, plaintext, {
+          timestamp:            msg.created_at,
+          blockchain_confirmed: msg.blockchain_confirmed,
+          id:                   msg.id,
+        });
       } catch (err) {
         console.error("fetchInbox: failed to decrypt message from", sender, err);
       }
@@ -382,25 +400,77 @@ function stopInboxPoller() {
 // ---------------------------------------------------------------------------
 
 function showAuth() {
-  document.getElementById("auth-section").style.display = "block";
+  document.getElementById("auth-section").style.display = "flex";
   document.getElementById("app-section").style.display  = "none";
 }
 
 function showApp() {
   document.getElementById("auth-section").style.display = "none";
   document.getElementById("app-section").style.display  = "flex";
+  const display = document.getElementById("my-username-display");
+  if (display && currentUser) display.textContent = currentUser.username;
 }
 
-function renderMessage(senderUsername, plaintext) {
+function renderMessage(senderUsername, plaintext, meta = {}) {
+  // Determine which conversation this belongs to.
+  const partner = senderUsername === currentUser?.username ? activeRecipient : senderUsername;
+  if (!partner) return;
+
+  // Cache in RAM so switching conversations re-renders from memory.
+  if (!decryptedCache.has(partner)) decryptedCache.set(partner, []);
+  decryptedCache.get(partner).push({ sender: senderUsername, plaintext, meta });
+
+  // Only render immediately if this is the currently open conversation.
+  if (partner !== activeRecipient) return;
+
   const list = document.getElementById("message-list");
   if (!list) return;
-  const item = document.createElement("div");
-  item.className = "message";
+  _appendBubble(list, senderUsername, plaintext, meta);
+
+  const wrapper = document.getElementById("messages-wrapper");
+  if (wrapper) wrapper.scrollTop = wrapper.scrollHeight;
+}
+
+function _appendBubble(list, senderUsername, plaintext, meta = {}) {
   const isMine = senderUsername === currentUser?.username;
-  item.style.textAlign = isMine ? "right" : "left";
-  item.innerHTML = `<strong>${escapeHtml(senderUsername)}:</strong> ${escapeHtml(plaintext)}`;
-  list.appendChild(item);
-  list.scrollTop = list.scrollHeight;
+  const bubble = document.createElement("div");
+  bubble.className = `message-bubble ${isMine ? "sent" : "received"}`;
+  if (meta.id) bubble.dataset.messageId = meta.id;
+
+  const timeStr = meta.timestamp
+    ? new Date(meta.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+
+  const badgeHtml = meta.blockchain_confirmed
+    ? '<span class="badge-verified" title="Blockchain verified">✓</span>'
+    : (meta.timestamp ? '<span class="badge-pending" title="Pending blockchain confirmation">⏳</span>' : "");
+
+  bubble.innerHTML =
+    `<div class="bubble-text">${escapeHtml(plaintext)}</div>` +
+    `<div class="bubble-meta">${escapeHtml(timeStr)}${badgeHtml}</div>`;
+
+  list.appendChild(bubble);
+}
+
+function _prependBubble(list, senderUsername, plaintext, meta = {}) {
+  const isMine = senderUsername === currentUser?.username;
+  const bubble = document.createElement("div");
+  bubble.className = `message-bubble ${isMine ? "sent" : "received"}`;
+  if (meta.id) bubble.dataset.messageId = meta.id;
+
+  const timeStr = meta.timestamp
+    ? new Date(meta.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+
+  const badgeHtml = meta.blockchain_confirmed
+    ? '<span class="badge-verified" title="Blockchain verified">✓</span>'
+    : (meta.timestamp ? '<span class="badge-pending" title="Pending blockchain confirmation">⏳</span>' : "");
+
+  bubble.innerHTML =
+    `<div class="bubble-text">${escapeHtml(plaintext)}</div>` +
+    `<div class="bubble-meta">${escapeHtml(timeStr)}${badgeHtml}</div>`;
+
+  list.insertBefore(bubble, list.firstChild);
 }
 
 function escapeHtml(str) {
@@ -410,17 +480,8 @@ function escapeHtml(str) {
 
 function attachEventListeners() {
   document.getElementById("btn-login").addEventListener("click", login);
-  document.getElementById("btn-register").addEventListener("click", register);
   document.getElementById("btn-logout").addEventListener("click", logout);
   document.getElementById("btn-send").addEventListener("click", sendMessage);
-  document.getElementById("show-register").addEventListener("click", () => {
-    document.getElementById("login-form").style.display    = "none";
-    document.getElementById("register-form").style.display = "block";
-  });
-  document.getElementById("show-login").addEventListener("click", () => {
-    document.getElementById("register-form").style.display = "none";
-    document.getElementById("login-form").style.display    = "block";
-  });
 
   document.getElementById("btn-add-contact").addEventListener("click", async () => {
     const input    = document.getElementById("new-contact");
@@ -434,6 +495,30 @@ function attachEventListeners() {
       alert(err.message);
     }
   });
+
+  // Allow adding a friend by pressing Enter in the new-contact field.
+  document.getElementById("new-contact").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); document.getElementById("btn-add-contact").click(); }
+  });
+
+  // Client-side search: show/hide contact rows as user types.
+  document.getElementById("search-conversations").addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.getElementById("contact-list").querySelectorAll("li").forEach(li => {
+      li.style.display = (!q || li.dataset.username.toLowerCase().includes(q)) ? "" : "none";
+    });
+  });
+
+  // Load older messages button.
+  document.getElementById("btn-load-older").addEventListener("click", loadOlderMessages);
+
+  // Mobile: hamburger toggle for sidebar.
+  const menuToggle = document.getElementById("menu-toggle");
+  if (menuToggle) {
+    menuToggle.addEventListener("click", () => {
+      document.getElementById("sidebar").classList.toggle("open");
+    });
+  }
 
   // Allow Send on Enter (Shift+Enter for newline).
   document.getElementById("plaintext-input").addEventListener("keydown", (e) => {
@@ -449,13 +534,105 @@ function addContactToSidebar(username) {
   const li = document.createElement("li");
   li.dataset.username = username;
   li.textContent      = username;
-  li.style.cursor     = "pointer";
-  li.addEventListener("click", () => {
-    activeRecipient = username;
-    document.getElementById("chat-recipient").textContent = username;
-    document.getElementById("message-list").innerHTML = "";
-  });
+  li.addEventListener("click", () => _openConversation(username));
   list.appendChild(li);
+}
+
+function _openConversation(username) {
+  // Update active state in sidebar.
+  const list = document.getElementById("contact-list");
+  if (list) {
+    list.querySelectorAll("li").forEach(el => el.classList.remove("active"));
+    const target = list.querySelector(`[data-username="${CSS.escape(username)}"]`);
+    if (target) target.classList.add("active");
+  }
+
+  activeRecipient = username;
+  oldestLoadedId  = null;
+
+  document.getElementById("chat-recipient").textContent = username;
+  document.getElementById("message-list").innerHTML = "";
+
+  // Re-render any messages already decrypted this session.
+  const cached = decryptedCache.get(username) || [];
+  const msgList = document.getElementById("message-list");
+  for (const entry of cached) {
+    _appendBubble(msgList, entry.sender, entry.plaintext, entry.meta);
+  }
+
+  // Show the "Load older messages" button once a conversation is open.
+  const olderBtn = document.getElementById("btn-load-older");
+  if (olderBtn) olderBtn.style.display = "flex";
+
+  const wrapper = document.getElementById("messages-wrapper");
+  if (wrapper) wrapper.scrollTop = wrapper.scrollHeight;
+
+  // On mobile, close sidebar after selecting a conversation.
+  document.getElementById("sidebar")?.classList.remove("open");
+}
+
+// ---------------------------------------------------------------------------
+// Load older messages (cursor-based pagination)
+// ---------------------------------------------------------------------------
+
+async function loadOlderMessages() {
+  if (!activeRecipient) return;
+  try {
+    const url = `/messages/inbox?with_user=${encodeURIComponent(activeRecipient)}&limit=10` +
+      (oldestLoadedId ? `&before=${encodeURIComponent(oldestLoadedId)}` : "");
+
+    const messages = await apiFetch(url);
+    if (messages.length === 0) {
+      const btn = document.getElementById("btn-load-older");
+      if (btn) btn.style.display = "none";
+      return;
+    }
+
+    const list = document.getElementById("message-list");
+    // Oldest first — API returns newest-first, so reverse before prepending.
+    for (const msg of [...messages].reverse()) {
+      if (seenMessageIds.has(msg.id)) continue;
+      seenMessageIds.add(msg.id);
+
+      const sender = msg.sender_username;
+      try {
+        let session = sessions.get(sender) ?? await loadSession(sender);
+
+        if (!session && msg.x3dh_header) {
+          const { SK } = await x3dhReceive(myPrivateKey, msg.x3dh_header);
+          session = await initSessionAsReceiver(SK, msg.x3dh_header.ik_a, myPublicKeyB64);
+        }
+
+        if (!session) continue;
+
+        const plaintext = await ratchetDecrypt(
+          session,
+          { ciphertext: msg.ciphertext, nonce: msg.nonce, ratchet_pub: msg.ratchet_pub, pn: msg.pn, n: msg.n },
+          session.ik_a,
+          session.ik_b,
+        );
+
+        sessions.set(sender, session);
+        await saveSession(sender, session);
+
+        const meta = {
+          timestamp:            msg.created_at,
+          blockchain_confirmed: msg.blockchain_confirmed,
+          id:                   msg.id,
+        };
+        _prependBubble(list, sender, plaintext, meta);
+
+        if (!decryptedCache.has(sender)) decryptedCache.set(sender, []);
+        decryptedCache.get(sender).unshift({ sender, plaintext, meta });
+
+        oldestLoadedId = msg.id;
+      } catch (err) {
+        console.error("loadOlderMessages: decrypt failed", msg.id, err);
+      }
+    }
+  } catch (err) {
+    console.error("loadOlderMessages failed:", err);
+  }
 }
 
 // ---------------------------------------------------------------------------

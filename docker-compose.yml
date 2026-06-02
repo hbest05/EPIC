@@ -39,6 +39,8 @@ services:
       # /abi/ (where the ABI JSON lives in the image) is NOT under /app
       # so it is not shadowed by this mount.
       - ./backend:/app
+      # Mount public assets so the video/SVG files are served at /public/ in dev.
+      - ./public:/app/public
     depends_on:
       db:
         condition: service_healthy
