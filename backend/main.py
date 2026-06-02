@@ -65,7 +65,7 @@ app.include_router(blockchain.conversations_router, prefix="/api/conversations",
 # Real-time delivery socket — mounted at the root so the client connects to /ws.
 app.include_router(ws.router, tags=["ws"])
 # Public verify — no auth required, used by the standalone verify.html page
-app.include_router(blockchain.public_router,        prefix="/public/verify",     tags=["verify-public"])
+app.include_router(blockchain.public_router,        prefix="/api/verify-public", tags=["verify-public"])
 
 
 # html=True enables SPA-style routing (serves index.html for directory paths).

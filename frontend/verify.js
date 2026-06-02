@@ -53,7 +53,7 @@ async function runVerify() {
 
   spinner.style.display = "block";
 
-  const url = new URL(`${window.location.origin}/public/verify/${encodeURIComponent(convId)}`);
+  const url = new URL(`${window.location.origin}/api/verify-public/${encodeURIComponent(convId)}`);
   if (rawText) url.searchParams.set("text", rawText);
 
   let data, status;
