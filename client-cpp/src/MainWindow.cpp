@@ -483,13 +483,29 @@ void MainWindow::onChangePasswordClicked()
         return;
     }
 
+    // Order matters: change the server password first, then re-key the local
+    // identity/session files. Never the reverse — a successful local re-key
+    // followed by a failed server change would leave the two out of sync with
+    // no way for the user to recover the old local passphrase.
     const QString err = m_client->changePassword(current, next);
-    if (err.isEmpty()) {
-        QMessageBox::information(this, tr("Change Password"),
-                                 tr("Your password has been updated."));
-    } else {
+    if (!err.isEmpty()) {
         QMessageBox::warning(this, tr("Change Password"), err);
+        return;
     }
+
+    try {
+        m_client->daemon()->rekeyIdentity(next);
+    } catch (const CryptoDaemonError&) {
+        QMessageBox::warning(this, tr("Change Password"),
+                             tr("Your server password was changed successfully, but the "
+                                "local key file could not be re-encrypted under the new "
+                                "password. Please try changing your password again to "
+                                "resync your local keys."));
+        return;
+    }
+
+    QMessageBox::information(this, tr("Change Password"),
+                             tr("Your password has been updated."));
 }
 
 // ---------------------------------------------------------------------------
