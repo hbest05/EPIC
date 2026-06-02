@@ -15,7 +15,9 @@ _VALID_CLIENT_TYPES = {"web", "cpp"}
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(..., min_length=3, max_length=64)
+    # pattern restricts to safe chars — prevents stored XSS and SQL-injection strings
+    # from reaching the DB (INJ-04: <script> tag was accepted without this guard).
+    username: str = Field(..., min_length=3, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$')
     email: EmailStr
     password: str = Field(..., min_length=12, description="Min 12 chars; will be hashed with Argon2id")
     x25519_public_key: str = Field(..., description="Base64-encoded X25519 identity key — used in X3DH DH operations")
@@ -27,6 +29,11 @@ class LoginRequest(BaseModel):
     username: str
     password: str
     client_type: str = Field(..., description="Client type: 'web' or 'cpp'")
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(..., min_length=12)
 
 
 class LoginResponse(BaseModel):

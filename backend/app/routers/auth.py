@@ -14,6 +14,7 @@ from app.models.message import UserKey
 from app.models.signal import OneTimePrekey, SignedPrekey
 from app.models.user import User
 from app.schemas.auth import (
+    ChangePasswordRequest,
     KeyBundleResponse,
     LoginRequest,
     LoginResponse,
@@ -181,6 +182,63 @@ async def login(request: Request, body: LoginRequest, response: Response, db: As
     )
 
     return LoginResponse(id=str(user.id), username=user.username)
+
+
+@router.post("/change-password")
+@limiter.limit("5/minute")
+async def change_password(
+    request: Request,
+    body: ChangePasswordRequest,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    ip = request.client.host
+
+    # Reject immediately if this IP has hit the failure threshold
+    if await get_auth_failure_count(ip) >= AUTH_MAX_FAILURES:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Try again later.",
+        )
+
+    # Same constant-time pattern as login: a wrong current password counts
+    # as an auth failure against the IP throttle.
+    if not verify_password(body.current_password, current_user.password_hash):
+        await record_auth_failure(ip)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    if body.new_password == body.current_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must differ from current password",
+        )
+
+    current_user.password_hash = hash_password(body.new_password)
+    await db.commit()
+
+    # Rotate the session so the change invalidates the old token/CSRF pair.
+    token = create_access_token(str(current_user.id))
+    csrf_token = generate_csrf_token()
+
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        secure=_SECURE_COOKIE,
+        samesite="strict",
+        max_age=_COOKIE_MAX_AGE,
+    )
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=_SECURE_COOKIE,
+        samesite="strict",
+        max_age=_COOKIE_MAX_AGE,
+    )
+
+    return {"message": "Password updated"}
 
 
 @router.post("/logout")

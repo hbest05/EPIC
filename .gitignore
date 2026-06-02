@@ -59,3 +59,7 @@ Thumbs.db
 
 context.md
 client-cpp/build-47292/
+
+# Pentest logs — results regenerated at runtime, not committed
+pentest/logs/*.json
+pentest/logs/*.txt

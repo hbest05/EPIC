@@ -157,6 +157,13 @@ QList<CryptoDaemonClient::SessionInfo> CryptoDaemonClient::listSessions()
     return out;
 }
 
+void CryptoDaemonClient::rekeyIdentity(const QString& newPassphrase)
+{
+    QJsonObject params;
+    params.insert(QStringLiteral("new_passphrase"), newPassphrase);
+    call(QStringLiteral("rekey_identity"), params);
+}
+
 PrekeyBundle CryptoDaemonClient::generatePrekeys(const QByteArray& signPub)
 {
     QJsonObject params;

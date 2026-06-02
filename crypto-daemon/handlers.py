@@ -139,6 +139,22 @@ def op_load_identity(state: DaemonState, params: dict) -> dict:
     }
 
 
+def op_rekey_identity(state: DaemonState, params: dict) -> dict:
+    """Re-encrypt the loaded identity and all session files under a new
+    passphrase. No new keypairs are generated — only the at-rest encryption
+    changes. The passphrase is never logged."""
+    ident = state.require_identity()
+    new_pp = _require_str(params, "new_passphrase")
+    # Rewrites identity.enc under a fresh salt/nonce and updates
+    # state.identity.wrap_key in-place to the new wrap key.
+    identity_mod.save(ident, new_pp)
+    # Session files on disk are still encrypted under the old wrap key, so
+    # re-encrypt every loaded session under the new wrap key.
+    for sess in state.sessions.values():
+        session_store.save_session(sess, ident.wrap_key)
+    return {}
+
+
 def op_generate_prekeys(state: DaemonState, params: dict) -> dict:
     ident = state.require_identity()
     caller_sign_pub = params.get("sign_pub")
@@ -369,12 +385,13 @@ def op_dh_ratchet_step(state: DaemonState, params: dict) -> dict:
 
 OPS: Dict[str, Callable[[DaemonState, dict], dict]] = {
     "generate_identity": op_generate_identity,
-    "load_identity":     op_load_identity,
-    "generate_prekeys":  op_generate_prekeys,
-    "x3dh_send":         op_x3dh_send,
-    "x3dh_receive":      op_x3dh_receive,
-    "encrypt_message":   op_encrypt_message,
-    "decrypt_message":   op_decrypt_message,
-    "dh_ratchet_step":   op_dh_ratchet_step,
-    "list_sessions":     op_list_sessions,
+    "load_identity": op_load_identity,
+    "rekey_identity": op_rekey_identity,
+    "generate_prekeys": op_generate_prekeys,
+    "x3dh_send": op_x3dh_send,
+    "x3dh_receive": op_x3dh_receive,
+    "encrypt_message": op_encrypt_message,
+    "decrypt_message": op_decrypt_message,
+    "dh_ratchet_step": op_dh_ratchet_step,
+    "list_sessions": op_list_sessions,
 }
