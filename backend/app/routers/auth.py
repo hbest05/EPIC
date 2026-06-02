@@ -417,9 +417,8 @@ async def get_keybundle(
 
     # UserKey.public_key is BYTEA — encode to base64 for the wire
     return KeyBundleResponse(
-        user_id=target.id,
-        username=target.username,
         user_id=str(target.id),
+        username=target.username,
         ik_x25519=base64.b64encode(ik_x25519.public_key).decode(),
         ik_ed25519=base64.b64encode(ik_ed25519.public_key).decode(),
         ik_fingerprint=ik_x25519.key_fingerprint,
