@@ -72,8 +72,9 @@ EPIC/
 │       ├── models/
 │       │   ├── user.py        User ORM model
 │       │   ├── message.py     UserKey, Message, MessageAccess ORM models
-│       │   └── signal.py      Signal Protocol models — SignedPrekey,
-│       │                      OneTimePrekey, RatchetSession, SkippedMessageKey
+│       │   ├── signal.py      Signal Protocol models — SignedPrekey,
+│       │   │                  OneTimePrekey, RatchetSession, SkippedMessageKey
+│       │   └── revocation.py  Revocation event model
 │       ├── schemas/
 │       │   ├── auth.py        Pydantic schemas for auth endpoints
 │       │   └── message.py     Pydantic schemas for message endpoints
@@ -87,7 +88,7 @@ EPIC/
 │       └── services/
 │           ├── auth_service.py   Argon2id hashing + JWT lifecycle
 │           ├── rate_limit.py     slowapi Limiter singleton (shared by all routers)
-│           └── redis_service.py  Blockchain write queue + auth failure counters
+│           └── redis_service.py  Redis client init/close + auth failure counters
 │
 ├── frontend/                  Browser-based web client
 │   ├── index.html             Single-page app shell
@@ -263,7 +264,7 @@ npx hardhat compile
 npx hardhat test
 
 # Deploy to Sepolia testnet
-npx hardhat run scripts/deploy.js --network sepolia
+node scripts/deployRegistry.js
 
 # Verify on Etherscan (paste address from deploy output)
 npx hardhat verify --network sepolia <CONTRACT_ADDRESS>

@@ -127,9 +127,9 @@ Sender (Alice)                                        Recipient (Bob)
   |                                                          | plaintext = PKCS7_unpad(decrypt)
 ```
 
-**Why X3DH + Double Ratchet rather than HPKE Mode_Auth.** The natural single-primitive choice for authenticated key establishment is HPKE in authenticated mode (`mode_auth`, RFC 9180 §5.1.1), whose AuthEncap/AuthDecap (RFC 9180 §4.1) fold the sender's static key into the KEM so the recipient cryptographically confirms the message originated from the holder of that key. X3DH provides the same sender-authentication guarantee — `DH1 = X25519(IK_A, SPK_B)` binds the sender's long-term identity into the shared secret, so a recipient who derives the same SK knows it was produced by the holder of IK_A — making X3DH a justified equivalent of Mode_Auth for the introduction step. We choose it over bare HPKE because the conversation, not the single message, is the unit we must protect: X3DH seeds a Double Ratchet that gives forward secrecy across the whole session (each message key is derived once and destroyed, so a later compromise cannot recover earlier messages) and post-compromise security (the DH ratchet injects fresh X25519 entropy each round-trip, locking out an attacker who captured prior state) — properties a single-shot HPKE seal does not provide. X3DH also keeps the asynchronous, offline-friendly publication model (the recipient need only have prekeys on the server; they need not be online), and it preserves deniability by authenticating via shared-secret DH rather than a transferable signature over the message. These gains are not free: the construction is stateful (per-session mutable ratchet state that must be persisted, re-keyed on password change, and reconciled across out-of-order and skipped messages) and more complex than a stateless HPKE call, which enlarges the implementation and its failure surface — a cost we accept and contain with the bounds described in §7 (MAX_SKIPPED, one-key-per-message nonce discipline).
+**Why X3DH + Double Ratchet rather than HPKE Mode_Auth.** The natural single-primitive choice for authenticated key establishment is HPKE in authenticated mode (`mode_auth`, RFC 9180 §5.1.1), whose AuthEncap/AuthDecap (RFC 9180 §4.1) fold the sender's static key into the KEM so the recipient cryptographically confirms the message originated from the holder of that key. X3DH provides the same sender-authentication guarantee — `DH1 = X25519(IK_A, SPK_B)` binds the sender's long-term identity into the shared secret, so a recipient who derives the same SK knows it was produced by the holder of IK_A — making X3DH a justified equivalent of Mode_Auth for the introduction step. We choose it over bare HPKE because the conversation, not the single message, is the unit we must protect: X3DH seeds a Double Ratchet that gives forward secrecy across the whole session (each message key is derived once and destroyed, so a later compromise cannot recover earlier messages) and post-compromise security (the DH ratchet injects fresh X25519 entropy each round-trip, locking out an attacker who captured prior state) — properties a single-shot HPKE seal does not provide. X3DH also keeps the asynchronous, offline-friendly publication model (the recipient need only have prekeys on the server; they need not be online), and it preserves deniability by authenticating via shared-secret DH rather than a transferable signature over the message. These gains are not free: the construction is stateful (per-session mutable ratchet state that must be persisted, re-keyed on password change, and reconciled across out-of-order and skipped messages) and more complex than a stateless HPKE call, which enlarges the implementation and its failure surface — a cost we accept and contain with the bounds described in §8 (MAX_SKIPPED, one-key-per-message nonce discipline).
 
-**X3DH handshake.** To start a session, the sender fetches the recipient's bundle, **verifies the Ed25519 signature over the SPK first**, then performs four Diffie–Hellman operations and feeds their ordered concatenation into HKDF (Signal X3DH spec §3, with KDF input encoding per §2.2). Each DH plays a distinct role: `DH1 = X25519(IK_A, SPK_B)` binds the sender's long-term identity (authentication); `DH2 = X25519(EK_A, IK_B)` and `DH3 = X25519(EK_A, SPK_B)` bind the sender's ephemeral to the recipient's identity and signed prekey (forward secrecy); `DH4 = X25519(EK_A, OPK_B)` mixes in one-time entropy that defeats replay of the initial message. The shared secret is `SK = HKDF-SHA256(IKM = DH1‖DH2‖DH3‖DH4, salt = 32 zero bytes, info = "SecureMsg_X3DH_v1")`. An all-zero salt is explicitly permitted by HKDF (RFC 5869 §3.1); the `info` string provides domain separation so this secret can never collide with a key derived in another context. If the recipient has no OPK left, the handshake gracefully drops to **3-DH** (DH1‖DH2‖DH3); authentication and forward secrecy are retained, replay protection of the very first message is weakened until OPKs are replenished (§7).
+**X3DH handshake.** To start a session, the sender fetches the recipient's bundle, **verifies the Ed25519 signature over the SPK first**, then performs four Diffie–Hellman operations and feeds their ordered concatenation into HKDF (Signal X3DH spec §3, with KDF input encoding per §2.2). Each DH plays a distinct role: `DH1 = X25519(IK_A, SPK_B)` binds the sender's long-term identity (authentication); `DH2 = X25519(EK_A, IK_B)` and `DH3 = X25519(EK_A, SPK_B)` bind the sender's ephemeral to the recipient's identity and signed prekey (forward secrecy); `DH4 = X25519(EK_A, OPK_B)` mixes in one-time entropy that defeats replay of the initial message. The shared secret is `SK = HKDF-SHA256(IKM = DH1‖DH2‖DH3‖DH4, salt = 32 zero bytes, info = "SecureMsg_X3DH_v1")`. An all-zero salt is explicitly permitted by HKDF (RFC 5869 §3.1); the `info` string provides domain separation so this secret can never collide with a key derived in another context. If the recipient has no OPK left, the handshake gracefully drops to **3-DH** (DH1‖DH2‖DH3); authentication and forward secrecy are retained, replay protection of the very first message is weakened until OPKs are replenished (§8).
 
 **Double Ratchet — symmetric chain step.** Within a chain, each message key is produced by a one-way symmetric ratchet: `(CK_next, MK) = HKDF-SHA256(CK, info = "SecureMsg_MsgKey_v1")`. The old chain key is overwritten, so a compromise of current state cannot reconstruct earlier message keys — this is the forward-secrecy property (Signal Double Ratchet spec §3).
 
@@ -143,7 +143,97 @@ Sender (Alice)                                        Recipient (Bob)
 
 ---
 
-## 5. Primitive Justification Table
+## 5. Storage at Rest
+
+The diagrams below cover the two distinct at-rest environments: the Python crypto daemon (used by the C++ client) and the browser.
+
+### 5a. Daemon — encrypted key file
+
+```
+                  LOCK (registration or on-quit)
+                  ──────────────────────────────
+User passphrase ─────────────────────────────────────────┐
++ 16-byte random salt (generated once, stored in file)   │
+                                                          │
+  argon2id(password, salt, m=65536 KiB, t=3, p=1)        │
+  ──────────────────────────────────────────────────────  │
+                                                          ▼
+                                               wrap_key (256-bit)
+                                                          │
+┌───────────────────────────────────────────┐             │
+│  Serialised private key material          │             │
+│  { IK.priv, IK_sig.priv, SPK.priv,       │  AES-256-GCM(key=wrap_key,
+│    OPK_1.priv .. OPK_n.priv,             │  nonce=96-bit CSPRNG)
+│    ratchet_state }                        │             │
+└───────────────────────────────────────────┘             │
+                                                          ▼
+┌──────────────────────────────────────────────────────────────┐
+│  keys.enc  (on disk)                                         │
+│  [ argon2id_salt (16 B) | nonce (12 B) | ciphertext | tag ]  │
+└──────────────────────────────────────────────────────────────┘
+
+                  UNLOCK (login)
+                  ──────────────
+User passphrase + salt (read from keys.enc header)
+  argon2id → wrap_key (re-derived, same params)
+  AES-256-GCM.Open(ciphertext, nonce, wrap_key)
+                    │
+                    ▼
+  private key material ──────────────────► process memory
+  wrap_key ──────────────────────────────► process memory
+                                           (session lifetime; see §8)
+
+  On logout / lock:  memory zeroed; keys.enc on disk is unchanged.
+  A stolen locked device sees only the Argon2id-hardened blob.
+```
+
+### 5b. Browser — non-extractable CryptoKey objects
+
+```
+                  REGISTRATION
+                  ────────────
+User passphrase ─────────────────────────────────────────┐
++ 16-byte random salt (stored in IndexedDB)              │
+                                                          │
+  PBKDF2-SHA256(password, salt, iterations=600 000)       │
+  HKDF-SHA256(output, info="EPIC-v1-wrap-key")            │
+  ──────────────────────────────────────────────────────  │
+                                                          ▼
+                                      wrapping_key (AES-256-GCM)
+                                      held in JS memory only — never persisted
+
+  SubtleCrypto.generateKey()             SubtleCrypto.wrapKey(PKCS#8, ·, wrapping_key)
+  ──────────────────────────             ───────────────────────────────────────────────
+  IK  keypair  (X25519)       ──►  IK.priv  wrapped blob  ────────────────► IndexedDB
+  IK_sig keypair (Ed25519)    ──►  IK_sig.priv wrapped blob ──────────────► IndexedDB
+  SPK keypair  (X25519)       ──►  SPK.priv wrapped blob  ────────────────► IndexedDB
+  OPK_1..n keypairs (X25519)  ──►  OPK_i.priv wrapped blobs ──────────────► IndexedDB
+
+  IK.pub, IK_sig.pub, SPK.pub, OPKs.pub ──────────────────► POST /register (server)
+
+                  LOGIN
+                  ─────
+User passphrase + salt (read from IndexedDB)
+  PBKDF2-SHA256 → HKDF-SHA256 (identical derivation)
+                    │
+                    ▼
+  wrapping_key (re-derived in JS memory)
+                    │
+  SubtleCrypto.unwrapKey(blobs from IndexedDB, wrapping_key)
+                    │
+                    ▼
+  non-extractable CryptoKey objects in JS memory
+  (raw bytes never accessible to script — browser enforces this)
+
+  On logout: wrapping_key variable cleared; IndexedDB wrapped blobs unchanged.
+  A stolen logged-out device exposes only PBKDF2-hardened wrapped blobs.
+```
+
+**Server-side at rest.** The server stores no private key material. Its database holds: Argon2id password hashes (never the password), public key bundles (IK.pub, IK_sig.pub, SPK.pub + Ed25519 signature, OPK.pub values consumed one-by-one), and opaque AES-256-GCM ciphertext blobs with routing metadata. A complete database dump yields nothing decryptable without the corresponding endpoint private keys.
+
+---
+
+## 6. Primitive Justification Table
 
 | Primitive | Algorithm + Params | Security Property | Why These Params | RFC / Citation |
 |---|---|---|---|---|
@@ -158,7 +248,7 @@ Sender (Alice)                                        Recipient (Bob)
 
 ---
 
-## 6. Trust Model
+## 7. Trust Model
 
 SecureMsg uses **Trust-On-First-Use (TOFU)**, the standard authenticity model for Signal/WhatsApp-class messengers that operate without a public-key infrastructure.
 
@@ -174,11 +264,11 @@ SecureMsg uses **Trust-On-First-Use (TOFU)**, the standard authenticity model fo
 
 ---
 
-## 7. Known Limitations
+## 8. Known Limitations
 
 We list these openly; each is a deliberate trade-off rather than an oversight.
 
-- **TOFU first-contact MITM window.** Authenticity of a contact's identity key is only guaranteed *after* first-use pinning. A server malicious at first contact can MITM that initial conversation until a legitimate key is pinned or users verify fingerprints out of band (§6).
+- **TOFU first-contact MITM window.** Authenticity of a contact's identity key is only guaranteed *after* first-use pinning. A server malicious at first contact can MITM that initial conversation until a legitimate key is pinned or users verify fingerprints out of band (§7).
 - **Metadata is visible to the server.** End-to-end encryption hides message *contents*, not the *fact* of communication. The server necessarily learns who messages whom and when. PKCS#7 padding to 256 bytes reduces the ciphertext-size channel but does not conceal timing, frequency, or the social graph.
 - **Skipped message keys cached in memory.** To handle out-of-order delivery, undecrypted-chain message keys are retained, bounded at **MAX_SKIP = 1000** per chain in the Python daemon; the JS frontend additionally enforces a global **MAX_SKIPPED_TOTAL = 2000** cap across all ratchet epochs. While cached these are live plaintext keys in memory and represent a small, bounded reduction in forward secrecy (an endpoint compromise during the window could decrypt those specific skipped messages). The cap also exists to defeat a denial-of-service via a crafted large skip count, which would otherwise force unbounded key derivation.
 - **Identity wrap key resident in memory for the session.** Once the user unlocks, the Argon2id-derived session wrap key (and the decrypted private keys) live in process memory for the session lifetime. An attacker with live memory-scrape or cold-boot access to an *already-unlocked* endpoint can extract them. This is the standard limit of any at-rest scheme: encryption protects keys at rest, not against a compromised running host.
