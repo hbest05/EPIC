@@ -1,0 +1,136 @@
+@startuml SecureMsg_Network_Architecture
+!theme plain
+skinparam linetype ortho
+skinparam nodesep 60
+skinparam ranksep 80
+skinparam defaultFontSize 12
+skinparam ArrowColor #444444
+skinparam BorderColor #444444
+
+title "Cryptmunks — SecureMsg Network Architecture\nCS4455 Epic Project 2026"
+
+' ─────────────────────────────────────────────
+' LEGEND / NOTES
+' ─────────────────────────────────────────────
+legend right
+  |= Symbol |= Meaning |
+  | HTTPS / TLS 1.3 | Encrypted transport (cert verified) |
+  | WSS | WebSocket over TLS |
+  | TCP loopback | 127.0.0.1 — never leaves the host |
+  | Internal (Docker) | Private bridge network, not exposed |
+  | Sepolia testnet | Public Ethereum test blockchain |
+endlegend
+
+' ─────────────────────────────────────────────
+' ZONES
+' ─────────────────────────────────────────────
+
+rectangle "Client Machine (end-user laptop)" #E8F4FD {
+
+  rectangle "C++ Qt Desktop Client\n(client-cpp / SecureMsg binary)" as CPP_CLIENT #B3D9F7 {
+    component "LoginWindow\nMainWindow" as GUI
+    component "Client.cpp\nNetworkUtils.cpp\n(libcurl + OpenSSL)" as NET
+    component "TLSVerifier.cpp\n(cert pinning / TOFU)" as TLSV
+    component "CryptoDaemonClient.cpp\n(TCP IPC to daemon)" as DAEMON_IPC
+    component "MessageStore.cpp\n(local encrypted cache)" as MSTORE
+    component "TofuStore.cpp\n(public key fingerprint store)" as TOFU
+  }
+
+  rectangle "Crypto Daemon\n(crypto-daemon / Python)" as CRYPTO_DAEMON #D4EDDA {
+    component "X3DH Key Exchange\n(x3dh.py)" as X3DH
+    component "Double Ratchet\n(double_ratchet.py)" as DR
+    component "Identity & Key Mgmt\n(identity.py)" as IDENTITY
+    component "Session Store\n(session_store.py)" as SESSION
+    component "Transport Layer\n(transport.py — TCP :47291)" as DAEMON_TRANSPORT
+  }
+
+}
+
+rectangle "User Browser (optional web client)" #FFF3E0 {
+  component "Frontend SPA\n(frontend/app.js + crypto.js)" as FRONTEND
+  component "Web Crypto API\n(HPKE / AES-GCM in browser)" as WEBCRYPTO
+  component "Blockchain Verify Page\n(frontend/verify.html)" as VERIFY_PAGE
+}
+
+rectangle "Cloud VM — cryptmunks.theburkenator.com\n(ALDERAAN.SOFTWARE-ENGINEERING.IE — Ubuntu Linux)" #F3E5F5 {
+
+  rectangle "Docker Compose Stack" #EDE7F6 {
+
+    rectangle "FastAPI Backend\n(backend/ — Python)" as BACKEND #CE93D8 {
+      component "Auth Router\n(/api/auth)" as AUTH_ROUTER
+      component "Messages Router\n(/api/messages)" as MSG_ROUTER
+      component "WebSocket Router\n(/api/ws)" as WS_ROUTER
+      component "Blockchain Router\n(/api/blockchain)" as BC_ROUTER
+      component "CSRF Middleware" as CSRF
+      component "Security Headers\nMiddleware" as SEC_HDR
+      component "Rate Limiter\n(slowapi)" as RATE
+      component "Auth Service\n(Argon2id hashing)" as AUTH_SVC
+      component "Blockchain Service\n(web3.py)" as BC_SVC
+      component "Redis Service\n(async queue)" as REDIS_SVC
+      component "WS Manager\n(connection registry)" as WS_MGR
+    }
+
+    database "PostgreSQL 16\n(db:5432 — internal)" as POSTGRES #B2EBF2 {
+      component "users table\n(id, username, argon2 hash,\npublic keys)" as T_USERS
+      component "messages table\n(ciphertext, metadata,\nnonce, sender/recipient)" as T_MSG
+      component "signal_* tables\n(prekeys, one-time keys)" as T_SIGNAL
+      component "revocation table" as T_REVOKE
+    }
+
+    queue "Redis 7\n(redis:6379 — internal)\nBlockchain Write Queue" as REDIS #FFCCBC
+
+  }
+
+}
+
+rectangle "External Services" #F5F5F5 {
+  cloud "Ethereum Sepolia Testnet\n(public blockchain)" as SEPOLIA #FFFDE7 {
+    component "MessageDigestRegistry\nSmart Contract (Solidity)\nkeccak256 hashes + timestamps" as CONTRACT
+  }
+  component "Hardhat / ethers.js\n(blockchain/digestRecorder.js)" as HARDHAT
+}
+
+' ─────────────────────────────────────────────
+' CONNECTIONS
+' ─────────────────────────────────────────────
+
+' C++ client ↔ Crypto Daemon (local loopback)
+DAEMON_IPC -down-> DAEMON_TRANSPORT : "JSON over TCP\n127.0.0.1:47291\n(loopback only)"
+
+' C++ client ↔ Backend API
+NET -right-> AUTH_ROUTER : "HTTPS / TLS 1.3\n(POST /api/auth/login\n POST /api/auth/register)"
+NET -right-> MSG_ROUTER  : "HTTPS / TLS 1.3\n(GET/POST /api/messages)"
+NET -right-> WS_ROUTER   : "WSS\n(real-time delivery)"
+
+' TLS verification
+TLSV .up. NET : "verifies server\ncertificate (TOFU\nor CA chain)"
+
+' Frontend ↔ Backend API
+FRONTEND -right-> AUTH_ROUTER : "HTTPS / TLS 1.3\n(POST /api/auth/*)"
+FRONTEND -right-> MSG_ROUTER  : "HTTPS / TLS 1.3\n(GET/POST /api/messages)"
+FRONTEND -right-> WS_ROUTER   : "WSS\n(real-time delivery)"
+FRONTEND ..> WEBCRYPTO         : "uses browser\ncrypto primitives"
+
+' Verify page ↔ Blockchain
+VERIFY_PAGE -right-> BC_ROUTER  : "HTTPS\n(GET /api/blockchain/verify)"
+VERIFY_PAGE ..> CONTRACT        : "read-only RPC\n(Sepolia)"
+
+' Backend ↔ PostgreSQL (Docker internal network)
+AUTH_ROUTER   -down-> T_USERS  : "asyncpg / SQLAlchemy\n(internal:5432)"
+MSG_ROUTER    -down-> T_MSG    : "asyncpg / SQLAlchemy\n(internal:5432)"
+MSG_ROUTER    -down-> T_SIGNAL : "asyncpg / SQLAlchemy\n(internal:5432)"
+MSG_ROUTER    -down-> T_REVOKE : "asyncpg / SQLAlchemy\n(internal:5432)"
+AUTH_SVC      -down-> T_USERS
+
+' Backend ↔ Redis (Docker internal network)
+BC_SVC  -down-> REDIS : "RPUSH blockchain:queue\n(internal:6379)"
+REDIS_SVC .down. REDIS
+
+' Redis ↔ Blockchain worker
+REDIS -down-> HARDHAT : "BLPOP queue\n(background worker)"
+HARDHAT -right-> CONTRACT : "eth_sendRawTransaction\n(HTTPS RPC — Sepolia)"
+
+' Backend ↔ Blockchain RPC (direct for reads)
+BC_SVC -right-> CONTRACT : "eth_call read\n(HTTPS RPC — Sepolia)"
+
+@enduml
