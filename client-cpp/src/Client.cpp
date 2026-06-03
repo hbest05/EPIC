@@ -88,6 +88,11 @@ QByteArray Client::httpRequest(const QString& method,
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+#if defined(_WIN32)
+    curl_easy_setopt(curl, CURLOPT_CAINFO, "C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt");
+#elif defined(__APPLE__)
+    curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/cert.pem");
+#endif
 
     // Persistent cookie jar so backend's session cookie survives between calls.
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, m_cookieJarPath.c_str());
@@ -202,6 +207,7 @@ QString Client::registerUser(const QString& username,
     body.insert(QStringLiteral("password"), password);
     body.insert(QStringLiteral("x25519_public_key"),  QString::fromUtf8(x25519PubKey.toBase64()));
     body.insert(QStringLiteral("ed25519_public_key"), QString::fromUtf8(ed25519PubKey.toBase64()));
+    body.insert(QStringLiteral("client_type"), QStringLiteral("cpp"));
 
     const QByteArray resp = httpRequest(QStringLiteral("POST"),
                                         QStringLiteral("/api/auth/register"),
@@ -226,6 +232,7 @@ QString Client::login(const QString& username, const QString& password)
     QJsonObject body;
     body.insert(QStringLiteral("username"), username);
     body.insert(QStringLiteral("password"), password);
+    body.insert(QStringLiteral("client_type"), QStringLiteral("cpp"));
 
     const QByteArray resp = httpRequest(QStringLiteral("POST"),
                                         QStringLiteral("/api/auth/login"),
