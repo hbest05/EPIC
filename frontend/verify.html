@@ -116,12 +116,17 @@
         <p class="auth-sublink">or <a href="index.html">sign in →</a></p>
 
         <p style="font-size:13px;color:rgba(255,255,255,0.4);font-family:var(--font-serif);margin-top:-6px;line-height:1.65;">
-          No login required. Enter a conversation ID to check its on-chain integrity record.
+          No login required. Enter the two usernames in the conversation to check its on-chain integrity record.
         </p>
 
-        <label class="verify-label" for="convId">Conversation ID</label>
-        <input type="text" id="convId"
-               placeholder="e.g. 0192abcd-…_0192ef01-…"
+        <label class="verify-label" for="userA">Your username</label>
+        <input type="text" id="userA"
+               placeholder="e.g. alice"
+               spellcheck="false" autocomplete="off" />
+
+        <label class="verify-label" for="userB">Other participant's username</label>
+        <input type="text" id="userB"
+               placeholder="e.g. bob"
                spellcheck="false" autocomplete="off" />
 
         <label class="verify-label" for="msgText">

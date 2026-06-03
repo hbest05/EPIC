@@ -29,8 +29,8 @@ function showError(msg) {
 // ---------------------------------------------------------------------------
 (function () {
   const p = new URLSearchParams(window.location.search);
-  const id = p.get("id") || p.get("conversation_id");
-  if (id) document.getElementById("convId").value = id;
+  if (p.get("user_a")) document.getElementById("userA").value = p.get("user_a");
+  if (p.get("user_b")) document.getElementById("userB").value = p.get("user_b");
 
   document.getElementById("btn-verify").addEventListener("click", runVerify);
 })();
@@ -39,21 +39,28 @@ function showError(msg) {
 // Main verify flow
 // ---------------------------------------------------------------------------
 async function runVerify() {
-  const convId   = document.getElementById("convId").value.trim();
+  const userA    = document.getElementById("userA").value.trim();
+  const userB    = document.getElementById("userB").value.trim();
   const rawText  = document.getElementById("msgText").value;
   const resultEl = document.getElementById("result");
   const spinner  = document.getElementById("spinner");
 
   resultEl.innerHTML = "";
 
-  if (!convId) {
-    showError("Please enter a Conversation ID.");
+  if (!userA || !userB) {
+    showError("Please enter both usernames.");
+    return;
+  }
+  if (userA.toLowerCase() === userB.toLowerCase()) {
+    showError("Please enter two different usernames.");
     return;
   }
 
   spinner.style.display = "block";
 
-  const url = new URL(`${window.location.origin}/api/verify-public/${encodeURIComponent(convId)}`);
+  const url = new URL(`${window.location.origin}/api/verify-public/by-users`);
+  url.searchParams.set("user_a", userA);
+  url.searchParams.set("user_b", userB);
   if (rawText) url.searchParams.set("text", rawText);
 
   let data, status;
@@ -70,7 +77,7 @@ async function runVerify() {
   spinner.style.display = "none";
 
   if (status === 404) {
-    showError("No blockchain record found for this conversation. Either the conversation ID is wrong or on-chain recording has not completed yet.");
+    showError("No blockchain record found for this conversation. Either one of the usernames is wrong, the two users have not exchanged messages, or on-chain recording has not completed yet.");
     return;
   }
   if (status === 503) {
@@ -93,7 +100,7 @@ async function runVerify() {
   resultEl.innerHTML = `
     ${verdictHtml}
     <table class="result-table">
-      <tr><td>Conversation ID</td><td>${escHtml(data.conversation_id ?? convId)}</td></tr>
+      <tr><td>Participants</td><td>${escHtml(userA)} &amp; ${escHtml(userB)}</td></tr>
       <tr><td>Record index</td><td>${escHtml(String(data.record_index ?? "—"))}</td></tr>
       <tr><td>On-chain digest</td><td><code>${escHtml(onChain)}</code></td></tr>
       <tr><td>Block timestamp</td><td>${escHtml(data.timestamp ? tsToHuman(data.timestamp) : "—")}</td></tr>

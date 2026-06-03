@@ -1,9 +1,9 @@
 """
-Redis service — async connection pool and blockchain write queue.
+Redis service — async connection pool and auth failure tracking.
 
-Uses Redis Streams as a durable queue: the backend pushes keccak256 hashes
-via push_hash_to_queue(); a worker (TODO below) reads from the stream and
-submits them to the MessageDigest smart contract on Ethereum.
+Blockchain recording is handled directly by blockchain_service.py via the
+three-tier model (batch accumulator, event-triggered, final digest).
+Redis is used here only for connection pooling and auth failure tracking.
 """
 
 import redis.asyncio as aioredis
@@ -15,8 +15,6 @@ from app.config import settings
 # ---------------------------------------------------------------------------
 
 _pool: aioredis.Redis | None = None
-
-BLOCKCHAIN_STREAM = "blockchain:hashes"
 
 
 async def init_redis() -> None:
@@ -39,24 +37,6 @@ def get_redis() -> aioredis.Redis:
     if _pool is None:
         raise RuntimeError("Redis pool not initialised — call init_redis() first")
     return _pool
-
-
-# ---------------------------------------------------------------------------
-# Blockchain write queue
-# ---------------------------------------------------------------------------
-
-async def push_hash_to_queue(message_id: str, keccak_hash: str) -> str:
-    """
-    Add a message hash to the blockchain write stream.
-
-    Returns the Redis stream entry ID assigned to this record.
-    """
-    redis = get_redis()
-    entry_id = await redis.xadd(
-        BLOCKCHAIN_STREAM,
-        {"message_id": message_id, "hash": keccak_hash},
-    )
-    return entry_id
 
 
 # ---------------------------------------------------------------------------
@@ -95,19 +75,3 @@ async def get_auth_failure_count(ip: str) -> int:
 async def clear_auth_failures(ip: str) -> None:
     """Delete the failure counter on a successful login."""
     await get_redis().delete(f"{_AUTH_FAIL_PREFIX}{ip}")
-
-
-# ---------------------------------------------------------------------------
-# TODO: Blockchain consumer loop
-#
-# Implement a background worker that:
-#   1. Calls XREADGROUP on BLOCKCHAIN_STREAM using a consumer group so that
-#      multiple workers can share the load and crashed entries are retried.
-#   2. Batches entries up to a configurable size (e.g. 10) and submits them
-#      to the smart contract via storeHashBatch() to save gas.
-#   3. ACKs each entry (XACK) only after the Ethereum transaction is confirmed.
-#   4. Handles pending entry recovery (XPENDING / XCLAIM) for entries that
-#      were read but never ACK'd due to a crash.
-#   5. Runs as an asyncio task launched from main.py on startup, cancelled
-#      cleanly on shutdown.
-# ---------------------------------------------------------------------------
