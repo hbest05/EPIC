@@ -91,6 +91,17 @@ void loadWindowsRootCerts(SSL_CTX* ctx)
 }
 #endif
 
+#ifdef __APPLE__
+// On macOS, OpenSSL builds (Homebrew, MacPorts) don't ship a bundled CA store
+// and the system keychain isn't directly readable by OpenSSL. /etc/ssl/cert.pem
+// is the curl-maintained bundle present on every supported macOS, so point the
+// trust store at it explicitly.
+void loadMacRootCerts(SSL_CTX* ctx)
+{
+    SSL_CTX_load_verify_locations(ctx, "/etc/ssl/cert.pem", nullptr);
+}
+#endif
+
 } // namespace
 
 TLSVerifier::VerifyResult TLSVerifier::verify(const std::string& hostname, uint16_t port)
@@ -117,6 +128,9 @@ TLSVerifier::VerifyResult TLSVerifier::verify(const std::string& hostname, uint1
     SSL_CTX_set_default_verify_paths(ctx);
 #ifdef _WIN32
     loadWindowsRootCerts(ctx);
+#endif
+#ifdef __APPLE__
+    loadMacRootCerts(ctx);
 #endif
 
     SSL* ssl = SSL_new(ctx);

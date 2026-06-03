@@ -27,10 +27,10 @@ One-Time Prekeys (OPKs) — pool of ~100 X25519 keypairs, each used exactly once
 Password hashing server side:
 Argon2id — memory: 64 MiB, iterations: 3, parallelism: 4 (~500ms on target hardware)
 Local client private key protection at rest:
-Argon2id(user_passphrase, salt_local, m=65536, t=3, p=4) → 32-byte wrap_key → AES-256-GCM(sk)
+Argon2id(user_passphrase, salt_local, m=65536, t=3, p=1) → 32-byte wrap_key → AES-256-GCM(sk)
 - Argon2id used (not HKDF) because the input is a low-entropy user passphrase — HKDF is not a password KDF and must not be used here
 - Separate salt and parameters from server-side Argon2id intentionally — different threat model (stolen device vs server breach)
-- C++ implementation note: libsodium's high-level crypto_pwhash API fixes parallelism to p=1; achieving p=4 requires the low-level Argon2 API. Deviation is negligible for this threat model and is acknowledged.
+- Parallelism note: server-side login hashing uses p=4 (auth_service.py); client at-rest wrapping uses p=1 (libsodium's crypto_pwhash fixes parallelism at 1; daemon ARGON_PAR=1). The two are tuned for different threat models and intentionally diverge.
 Trust model between two parties:
 TOFU + SHA-256 fingerprint pinning over IK bytes
 - Server compromise can MitM first contact (before pinning) — this limitation is acknowledged explicitly
@@ -64,7 +64,10 @@ Blockchain integrity anchor:
 keccak256(message ciphertext) committed to Sepolia smart contract before delivery confirmation
 - Any server-side modification to stored ciphertext produces an on-chain hash mismatch — detectable by any client
 - Server cannot silently rewrite message history (class d threat) — blockchain is infrastructure-independent of server
-- Per-message hashing strategy: maximum granularity, every message individually verifiable
+- Tiered batched recording strategy (not per-message):
+  - Tier 1: regular messages batched at BATCH_SIZE=10 per blockchain transaction (one tx per 10 messages)
+  - Tier 2: a single recordDigest() fires immediately on forward / revoke events (not batched)
+  - Tier 3: a closing digest is recorded on conversation close
 - Transaction hash stored in DB for later retrieval by the standalone verification page
 - Verification page: user inputs content → page recomputes keccak256 → compares against on-chain record → PASS/FAIL
 Application-layer availability controls:
