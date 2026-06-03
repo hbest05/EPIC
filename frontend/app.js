@@ -953,10 +953,9 @@ function _appendBubble(list, senderUsername, plaintext, meta = {}) {
   if (meta.id) bubble.dataset.messageId = meta.id;
 
   // Accept either milliseconds (from messageCache) or ISO strings (from API).
-  const tsMs    = typeof meta.timestamp === "number"
+  const tsMs = typeof meta.timestamp === "number"
     ? meta.timestamp
     : (meta.timestamp ? Date.parse(meta.timestamp) : 0);
-  const timeStr = formatTimestamp(tsMs);
 
   // Use textContent (not innerHTML) for all user-supplied strings to prevent XSS.
   const textEl = document.createElement("div");
@@ -965,7 +964,6 @@ function _appendBubble(list, senderUsername, plaintext, meta = {}) {
 
   const metaEl = document.createElement("div");
   metaEl.className = "bubble-meta";
-  metaEl.textContent = timeStr;
 
   bubble.appendChild(textEl);
   bubble.appendChild(metaEl);
