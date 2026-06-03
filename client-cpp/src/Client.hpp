@@ -117,7 +117,12 @@ public:
     void clearCurrentUser() { m_currentUser.reset(); }
 
     /** wss:// URL of the real-time delivery socket on the same host as the API. */
-    QString websocketUrl() const { return QStringLiteral("wss://") + m_baseHostname + QStringLiteral("/ws"); }
+    QString websocketUrl() const {
+        QString ws = m_baseUrl;
+        ws.replace(QStringLiteral("https://"), QStringLiteral("wss://"));
+        ws.replace(QStringLiteral("http://"),  QStringLiteral("ws://"));
+        return ws + QStringLiteral("/ws");
+    }
 
     /** Value of the httpOnly access_token cookie from libcurl's jar, used to
      *  authenticate the WebSocket handshake. Empty if not logged in. */
@@ -134,8 +139,8 @@ private:
     /** Pull the csrf_token cookie out of libcurl's cookie jar. */
     void refreshCsrfToken();
 
-    QString m_baseUrl      = QStringLiteral("https://alpha-and-the-cryptmunks.theburkenator.com");
-    QString m_baseHostname = QStringLiteral("alpha-and-the-cryptmunks.theburkenator.com");
+    QString m_baseUrl      = QStringLiteral("http://localhost:8000");
+    QString m_baseHostname = QStringLiteral("localhost");
 
     std::unique_ptr<CryptoDaemonClient> m_daemon;
 
