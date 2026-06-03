@@ -30,11 +30,11 @@ We analyse four attacker classes of increasing capability and state explicitly w
 
 ## 2. Key Material Overview
 
-All asymmetric keys are generated from a cryptographically secure RNG (`os.urandom` / libsodium `randombytes`). On the daemon, private keys live inside an Argon2id+AES-256-GCM-encrypted file on disk and are decrypted into process memory only while the session is unlocked. In the browser, private keys are created as **non-extractable `CryptoKey` objects** in IndexedDB — the browser keystore never exposes the raw bytes to JavaScript, so there is nothing to wrap.
+All asymmetric keys are generated from a cryptographically secure RNG (`os.urandom` / libsodium `randombytes`). On the daemon, private keys live inside an Argon2id+AES-256-GCM-encrypted file on disk and are decrypted into process memory only while the session is unlocked. In the browser, private keys are generated as **extractable `CryptoKey` objects**, immediately wrapped under a PBKDF2-SHA256-derived AES-256-GCM wrapping key via `SubtleCrypto.wrapKey("pkcs8", …)`, and stored as encrypted blobs in IndexedDB — the raw private key bytes are never written to persistent storage unprotected.
 
 | Key | Algorithm | How generated | Where it lives | When erased |
 |---|---|---|---|---|
-| **IK** (identity) | X25519 | CSPRNG at registration | Public on server; private at rest (wrapped file / non-extractable CryptoKey) | Account deletion (long-term; not rotated) |
+| **IK** (identity) | X25519 | CSPRNG at registration | Public on server; private at rest (wrapped file on daemon / PBKDF2-wrapped blob in IndexedDB on browser) | Account deletion (long-term; not rotated) |
 | **IK signing key** | Ed25519 | CSPRNG at registration | Public on server; private at rest | Account deletion |
 | **SPK** (signed prekey) | X25519 | CSPRNG at registration, rotated periodically | Public + Ed25519 signature on server; private at rest | On rotation (previous SPK immediately overwritten; only the most-recent SPK is kept — in-flight handshakes against a rotated SPK will fail) |
 | **OPKs** (one-time prekeys) | X25519 | CSPRNG in a batch at registration / top-up | Public batch on server; privates at rest | Each private erased immediately on consumption (one use only) |
@@ -46,6 +46,8 @@ All asymmetric keys are generated from a cryptographically secure RNG (`os.urand
 | **Session wrap key** | AES-256 key | Argon2id over the user passphrase + salt | Derived in memory at unlock | On logout/lock (resident for the session lifetime — see §7) |
 
 The strict one-message-per-MK lifecycle is the foundation of forward secrecy: a message key is derived, used exactly once, and destroyed, so compromising current ratchet state does not expose previously sent messages.
+
+> **Note on "erased" / "immediately" in the table above.** In the C++ client, erasure is guaranteed: private keys are allocated with `sodium_malloc` and wiped with `sodium_memzero` before freeing. In the Python daemon, erasure is best-effort: Python's CPython runtime uses immutable `bytes` objects for most cryptographic outputs, which cannot be force-zeroed by application code. "Erased" in the daemon context means the reference is deleted and the object becomes eligible for GC — the underlying bytes may remain in the heap until overwritten. See §8 for discussion.
 
 ---
 
@@ -61,8 +63,8 @@ Client (daemon / browser)                                Server
   | 4. Wrap private keys at rest (daemon):                  |
   |      wrapK = Argon2id(pass, salt, m=64MiB, t=3, p=1)    |
   |      blob  = AES-256-GCM(wrapK, nonce96, priv_material) |
-  |    (browser: keys are non-extractable CryptoKeys —      |
-  |     no wrap needed)                                     |
+  |    (browser: keys generated with extractable:true,       |
+  |     wrapped via wrapKey("pkcs8",·,wrapping_key) — §5b)  |
   |                                                         |
   | 5. POST /register  ----------------------------------->  |
   |    { IK.pub, IK_sig.pub, SPK.pub, sig,                  |
@@ -78,7 +80,7 @@ Client (daemon / browser)                                Server
 
 **Identity generation.** At first run the client generates two long-term keypairs: an **X25519 identity key (IK)** for all future Diffie–Hellman operations, and a separate **Ed25519 identity-signing key (IK_sig)** used only to sign prekeys. These are independent keys; we deliberately do *not* reuse a single Curve25519 key across both algorithms (no XEdDSA-style birational conversion), which removes the subtle requirements and cross-protocol attack surface of using one key in two algebraic settings.
 
-**Argon2id wrap at rest (daemon).** Private key material is serialised and sealed in a single file: a wrap key is derived from the user's passphrase with Argon2id (`m=65536 KiB`, `t=3`, `p=1`; see §5), and the serialised privates are encrypted with AES-256-GCM under that wrap key with a fresh random 96-bit nonce. A stolen disk image therefore yields only an Argon2id-hardened ciphertext. The browser achieves the equivalent at-rest property differently: keys are stored as non-extractable `CryptoKey` objects, so their raw bytes are never accessible to script and require no application-level wrapping.
+**Argon2id wrap at rest (daemon).** Private key material is serialised and sealed in a single file: a wrap key is derived from the user's passphrase with Argon2id (`m=65536 KiB`, `t=3`, `p=1`; see §5), and the serialised privates are encrypted with AES-256-GCM under that wrap key with a fresh random 96-bit nonce. A stolen disk image therefore yields only an Argon2id-hardened ciphertext. The browser achieves the equivalent at-rest property differently: keys are generated as extractable `CryptoKey` objects (extractable only so they can be immediately wrapped), wrapped under a PBKDF2-SHA256-derived AES-256-GCM key via `SubtleCrypto.wrapKey("pkcs8", …)`, and the encrypted blobs are stored in IndexedDB (see §5b). The raw private key bytes are never written to IndexedDB or disk unprotected.
 
 **SPK signing with Ed25519.** The signed prekey's public value is signed with `IK_sig` (RFC 8032 §5.1). This signature is what lets a recipient — and the server at publication time — confirm that the SPK genuinely belongs to the advertised identity rather than being a value injected by a network or server attacker.
 
@@ -183,11 +185,12 @@ User passphrase + salt (read from keys.enc header)
   wrap_key ──────────────────────────────► process memory
                                            (session lifetime; see §8)
 
-  On logout / lock:  memory zeroed; keys.enc on disk is unchanged.
+  On logout / lock:  best-effort memory clearing (see §8 — Python limitation);
+                     keys.enc on disk is unchanged.
   A stolen locked device sees only the Argon2id-hardened blob.
 ```
 
-### 5b. Browser — non-extractable CryptoKey objects
+### 5b. Browser — extractable keys wrapped under PBKDF2-derived key
 
 ```
                   REGISTRATION
@@ -222,10 +225,12 @@ User passphrase + salt (read from IndexedDB)
   SubtleCrypto.unwrapKey(blobs from IndexedDB, wrapping_key)
                     │
                     ▼
-  non-extractable CryptoKey objects in JS memory
-  (raw bytes never accessible to script — browser enforces this)
+  extractable CryptoKey objects in JS memory
+  (extractable so keys can be re-wrapped on password change;
+   raw bytes remain in the JS engine heap — not persisted)
 
-  On logout: wrapping_key variable cleared; IndexedDB wrapped blobs unchanged.
+  On logout: wrapping_key variable de-referenced (GC-collected; no guaranteed wipe);
+             IndexedDB wrapped blobs unchanged.
   A stolen logged-out device exposes only PBKDF2-hardened wrapped blobs.
 ```
 
@@ -272,7 +277,8 @@ We list these openly; each is a deliberate trade-off rather than an oversight.
 - **Metadata is visible to the server.** End-to-end encryption hides message *contents*, not the *fact* of communication. The server necessarily learns who messages whom and when. PKCS#7 padding to 256 bytes reduces the ciphertext-size channel but does not conceal timing, frequency, or the social graph.
 - **Skipped message keys cached in memory.** To handle out-of-order delivery, undecrypted-chain message keys are retained, bounded at **MAX_SKIP = 1000** per chain in the Python daemon; the JS frontend additionally enforces a global **MAX_SKIPPED_TOTAL = 2000** cap across all ratchet epochs. While cached these are live plaintext keys in memory and represent a small, bounded reduction in forward secrecy (an endpoint compromise during the window could decrypt those specific skipped messages). The cap also exists to defeat a denial-of-service via a crafted large skip count, which would otherwise force unbounded key derivation.
 - **Identity wrap key resident in memory for the session.** Once the user unlocks, the Argon2id-derived session wrap key (and the decrypted private keys) live in process memory for the session lifetime. An attacker with live memory-scrape or cold-boot access to an *already-unlocked* endpoint can extract them. This is the standard limit of any at-rest scheme: encryption protects keys at rest, not against a compromised running host.
-- **No cross-device account portability — by design.** Private keys are device-local and non-extractable (non-extractable `CryptoKey` in the browser; never-exported wrapped files on the daemon). An account cannot be cloned to a second device by copying key material. We classify this as a **trust-model strength, not a weakness**: there is no key-export path for malware or a coerced backup to abuse, and the attack surface for key exfiltration is minimised. The cost is convenience (re-enrolment per device), which we accept.
+- **Memory zeroing is best-effort in Python.** The daemon attempts to zero sensitive buffers on logout by overwriting `bytearray` copies. This is a genuine mitigation for data in mutable objects. However, CPython's runtime uses immutable `bytes` objects internally for most cryptographic outputs (DH intermediates, HKDF outputs, key material returned by library calls), and Python provides no mechanism to force-zero those — they linger in the heap until the GC reclaims and potentially overwrites them. In `x3dh.py` the zeroing loop over DH outputs is accordingly a no-op on the objects that matter. The honest claim is: **we make a best-effort attempt to reduce the window during which key material is findable in a heap dump, but we cannot guarantee it.** A full guarantee would require a native extension or a language with deterministic memory control (the C++ client, which uses `sodium_memzero` and `sodium_malloc`, does provide it). This is an accepted limitation of a Python implementation.
+- **No cross-device account portability — by design.** Private keys are device-local (PBKDF2-wrapped blobs in IndexedDB in the browser; never-exported Argon2id-wrapped files on the daemon). An account cannot be cloned to a second device by copying key material. We classify this as a **trust-model strength, not a weakness**: there is no key-export path for malware or a coerced backup to abuse, and the attack surface for key exfiltration is minimised. The cost is convenience (re-enrolment per device), which we accept.
 - **OPK depletion fallback to 3-DH.** When a recipient's one-time prekeys are exhausted, X3DH falls back to a 3-DH handshake (§4). Mutual authentication and forward secrecy are preserved, but the one-time replay protection on the *initial* message is lost until the OPK pool is replenished.
 - **AEAD is not key-committing.** Standard AES-256-GCM does not commit to its key, which is relevant because message *forwarding* is a product feature: in principle a malicious server could craft a ciphertext that decrypts validly under two different keys. We are aware of the mitigations (a key-committing AEAD construction, or AES-GCM-SIV per RFC 8452 for nonce-misuse resistance) and treat adopting one as future work; our current nonce discipline (one key per message) already removes the nonce-reuse failure mode.
 - **Post-quantum exposure.** X25519 is not quantum-resistant — a "harvest-now, decrypt-later" adversary could record today's ciphertexts and break the key agreement once large quantum computers exist. AES-256 retains a 128-bit effective margin under Grover and remains adequate. A hybrid X25519 + ML-KEM (Kyber) key agreement is the natural future-work path.

@@ -1,5 +1,3 @@
-Submit outside of project zip
-
 # EPIC — Cover Document
 
 **Group Name:** Alpha and the Cryptmunks (Team 3)  
@@ -60,6 +58,3 @@ Submit outside of project zip
 - Key fingerprint display and clipboard functionality
 
 ---
-
-## Additional Design Summaries, Diagrams, and Explanations
-
