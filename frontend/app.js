@@ -613,9 +613,11 @@ async function sendMessage() {
 async function fetchInbox() {
   try {
     const messages = await apiFetch("/messages/inbox");
+    // Reverse to oldest-first so the X3DH init message (sent first) is
+    // processed before follow-up messages that depend on the session it creates.
+    messages.reverse();
     for (const msg of messages) {
       if (seenMessageIds.has(msg.id)) continue;
-      seenMessageIds.add(msg.id);
 
       const sender = msg.sender_username;
       try {
@@ -656,6 +658,7 @@ async function fetchInbox() {
 
         const receivedAt = msg.created_at ? Date.parse(msg.created_at) || Date.now() : Date.now();
         await persistMessage(sender, currentUser.username, plaintext, msg.id, receivedAt, msg.blockchain_confirmed ?? false);
+        seenMessageIds.add(msg.id);
 
         if (sender === activeRecipient) renderThread(sender);
       } catch (err) {
