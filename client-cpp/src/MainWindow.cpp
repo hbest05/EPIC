@@ -726,17 +726,7 @@ void MainWindow::connectWebSocket()
 
     const QString token = m_client->accessTokenCookie();
 
-    // Authenticate the handshake two ways for robustness: the access_token
-    // cookie (mirrors the REST auth) and a ?token= query param fallback for
-    // when the upgrade request can't carry the cookie. The backend prefers the
-    // cookie and falls back to the query param.
     QUrl url(m_client->websocketUrl());
-    if (!token.isEmpty()) {
-        QUrlQuery q;
-        q.addQueryItem(QStringLiteral("token"), token);
-        url.setQuery(q);
-    }
-
     QNetworkRequest req(url);
     if (!token.isEmpty()) {
         req.setRawHeader("Cookie", "access_token=" + token.toUtf8());
